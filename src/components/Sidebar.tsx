@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Point, SplatSource, PinFilter } from '../App';
+import type { Point, SplatSource, PinFilter, PinCategory } from '../App';
 import { Trash2, Plus, Upload, Pencil, Lock, Unlock, RotateCcw, Download, FileDown, FileUp, AlertTriangle, Filter, X } from 'lucide-react';
 import * as spz from 'spz-js';
 import { convertToSplat } from '../utils/splatConverter';
@@ -53,8 +53,8 @@ type SidebarProps = {
   setDebugProxy: (debug: boolean) => void;
   onInteractionStart: () => void;
   onInteractionEnd: () => void;
-  pinCategories: string[];
-  setPinCategories: (categories: string[]) => void;
+  pinCategories: PinCategory[];
+  setPinCategories: (categories: PinCategory[]) => void;
   pinFilter: PinFilter;
   setPinFilter: (filter: PinFilter) => void;
   onUpdatePointCategories: (id: string, categories: string[]) => void;
@@ -68,8 +68,10 @@ type SidebarProps = {
   setBrushSize: (size: number) => void;
   eraserHistory: number[][];
   setEraserHistory: React.Dispatch<React.SetStateAction<number[][]>>;
-  erasedIndices: Set<number>;
-  setErasedIndices: React.Dispatch<React.SetStateAction<Set<number>>>;
+  erasedIndices: Map<number, number>;
+  setErasedIndices: React.Dispatch<React.SetStateAction<Map<number, number>>>;
+  originalColors: Map<number, number>;
+  setOriginalColors: React.Dispatch<React.SetStateAction<Map<number, number>>>;
 };
 
 const BufferedInput = ({ 
@@ -183,6 +185,8 @@ export default function Sidebar({
   setEraserHistory,
   erasedIndices,
   setErasedIndices,
+  originalColors,
+  setOriginalColors,
 }: SidebarProps) {
   const [inputUrl, setInputUrl] = useState(splatUrl);
   const [editingNameId, setEditingNameId] = useState<string | null>(null);
@@ -477,7 +481,9 @@ export default function Sidebar({
               <button 
                 onClick={() => {
                   setEraserHistory([]);
-                  setErasedIndices(new Set());
+                  setErasedIndices(new Map());
+                  console.log('setOriginalColors:', typeof setOriginalColors);
+                  setOriginalColors(new Map());
                   setShowResetConfirm(false);
                   addNotification('Eraser edits reset', 'info');
                 }}
@@ -1149,8 +1155,9 @@ export default function Sidebar({
                 className="flex-1 bg-neutral-900 border border-neutral-800 rounded-md px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 min-w-0"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && newCategoryName.trim()) {
-                    if (!pinCategories.includes(newCategoryName.trim())) {
-                      setPinCategories([...pinCategories, newCategoryName.trim()]);
+                    const name = newCategoryName.trim();
+                    if (!pinCategories.some(c => c.name === name)) {
+                      setPinCategories([...pinCategories, { name, subcategories: [] }]);
                       setNewCategoryName('');
                     } else {
                       addNotification('Category already exists', 'error');
@@ -1161,8 +1168,9 @@ export default function Sidebar({
               <button
                 onClick={() => {
                   if (newCategoryName.trim()) {
-                    if (!pinCategories.includes(newCategoryName.trim())) {
-                      setPinCategories([...pinCategories, newCategoryName.trim()]);
+                    const name = newCategoryName.trim();
+                    if (!pinCategories.some(c => c.name === name)) {
+                      setPinCategories([...pinCategories, { name, subcategories: [] }]);
                       setNewCategoryName('');
                     } else {
                       addNotification('Category already exists', 'error');
@@ -1174,28 +1182,88 @@ export default function Sidebar({
                 <Plus size={16} />
               </button>
             </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto">
+            <div className="space-y-2 max-h-64 overflow-y-auto">
               {pinCategories.map((category) => (
-                <div key={category} className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded px-2 py-1.5">
-                  <span className="text-xs text-neutral-300">{category}</span>
-                  <button
-                    onClick={() => {
-                      setPinCategories(pinCategories.filter(c => c !== category));
-                      // Also remove this category from all pins
-                      points.forEach(p => {
-                        if (p.categories?.includes(category)) {
-                          onUpdatePointCategories(p.id, p.categories.filter(c => c !== category));
+                <div key={category.name} className="bg-neutral-900 border border-neutral-800 rounded p-2 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-neutral-300">{category.name}</span>
+                    <button
+                      onClick={() => {
+                        setPinCategories(pinCategories.filter(c => c.name !== category.name));
+                        // Remove this category and its subcategories from all pins
+                        points.forEach(p => {
+                          if (p.categories?.some(c => c === category.name || c.startsWith(`${category.name}-`))) {
+                            onUpdatePointCategories(p.id, p.categories.filter(c => c !== category.name && !c.startsWith(`${category.name}-`)));
+                          }
+                        });
+                        // And from filter
+                        const newFilterCats = pinFilter.categories.filter(c => c !== category.name && !c.startsWith(`${category.name}-`));
+                        if (newFilterCats.length !== pinFilter.categories.length) {
+                          setPinFilter({ ...pinFilter, categories: newFilterCats });
                         }
-                      });
-                      // And from filter
-                      if (pinFilter.categories.includes(category)) {
-                        setPinFilter({ ...pinFilter, categories: pinFilter.categories.filter(c => c !== category) });
-                      }
-                    }}
-                    className="text-neutral-500 hover:text-red-400 transition-colors"
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                      }}
+                      className="text-neutral-500 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  
+                  {/* Subcategories */}
+                  <div className="pl-2 space-y-1 border-l border-neutral-700 ml-1">
+                    {category.subcategories.map(sub => (
+                      <div key={sub} className="flex items-center justify-between">
+                        <span className="text-[10px] text-neutral-400">{sub}</span>
+                        <button
+                          onClick={() => {
+                            const newCategories = pinCategories.map(c => 
+                              c.name === category.name 
+                                ? { ...c, subcategories: c.subcategories.filter(s => s !== sub) }
+                                : c
+                            );
+                            setPinCategories(newCategories);
+                            
+                            // Remove this subcategory from points
+                            const subCatName = `${category.name}-${sub}`;
+                            points.forEach(p => {
+                              if (p.categories?.includes(subCatName)) {
+                                onUpdatePointCategories(p.id, p.categories.filter(c => c !== subCatName));
+                              }
+                            });
+                            // And from filter
+                            if (pinFilter.categories.includes(subCatName)) {
+                              setPinFilter({ ...pinFilter, categories: pinFilter.categories.filter(c => c !== subCatName) });
+                            }
+                          }}
+                          className="text-neutral-600 hover:text-red-400 transition-colors"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1 mt-1">
+                      <input
+                        type="text"
+                        placeholder="Add sub-category..."
+                        className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-2 py-1 text-[10px] text-neutral-300 focus:outline-none focus:border-indigo-500"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                            const val = e.currentTarget.value.trim();
+                            if (!category.subcategories.includes(val)) {
+                              const newCategories = pinCategories.map(c => 
+                                c.name === category.name 
+                                  ? { ...c, subcategories: [...c.subcategories, val] }
+                                  : c
+                              );
+                              setPinCategories(newCategories);
+                            } else {
+                              addNotification('Sub-category already exists', 'error');
+                            }
+                            e.currentTarget.value = '';
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
                 </div>
               ))}
               {pinCategories.length === 0 && (
@@ -1268,11 +1336,30 @@ export default function Sidebar({
                   if (eraserHistory.length > 0) {
                     const lastStroke = eraserHistory[eraserHistory.length - 1];
                     setEraserHistory(prev => prev.slice(0, -1));
+                    
+                    let indicesToRemove: number[] = [];
+                    
                     setErasedIndices(prev => {
-                      const next = new Set(prev);
-                      lastStroke.forEach(idx => next.delete(idx));
+                      const next = new Map(prev);
+                      lastStroke.forEach(idx => {
+                        const count = next.get(idx) || 0;
+                        if (count <= 1) {
+                          next.delete(idx);
+                          indicesToRemove.push(idx);
+                        }
+                        else next.set(idx, count - 1);
+                      });
                       return next;
                     });
+                    
+                    if (indicesToRemove.length > 0) {
+                      setOriginalColors(prevColors => {
+                        const nextColors = new Map(prevColors);
+                        indicesToRemove.forEach(idx => nextColors.delete(idx));
+                        return nextColors;
+                      });
+                    }
+                    
                     addNotification(`Undid ${lastStroke.length} erased splats`, 'info');
                   }
                 }}
@@ -1320,21 +1407,43 @@ export default function Sidebar({
                     <div className="text-xs font-medium text-neutral-400 mb-2 px-1">Filter by Category</div>
                     <div className="space-y-1 max-h-40 overflow-y-auto mb-2">
                       {pinCategories.map(cat => (
-                        <label key={cat} className="flex items-center gap-2 px-1 py-0.5 hover:bg-neutral-800 rounded cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={pinFilter.categories.includes(cat)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setPinFilter({ ...pinFilter, categories: [...pinFilter.categories, cat] });
-                              } else {
-                                setPinFilter({ ...pinFilter, categories: pinFilter.categories.filter(c => c !== cat) });
-                              }
-                            }}
-                            className="rounded border-neutral-700 bg-neutral-800 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span className="text-xs text-neutral-200">{cat}</span>
-                        </label>
+                        <div key={cat.name} className="space-y-1">
+                          <label className="flex items-center gap-2 px-1 py-0.5 hover:bg-neutral-800 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={pinFilter.categories.includes(cat.name)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setPinFilter({ ...pinFilter, categories: [...pinFilter.categories, cat.name] });
+                                } else {
+                                  setPinFilter({ ...pinFilter, categories: pinFilter.categories.filter(c => c !== cat.name) });
+                                }
+                              }}
+                              className="rounded border-neutral-700 bg-neutral-800 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <span className="text-xs font-medium text-neutral-200">{cat.name}</span>
+                          </label>
+                          {cat.subcategories.map(sub => {
+                            const subCatName = `${cat.name}-${sub}`;
+                            return (
+                              <label key={subCatName} className="flex items-center gap-2 px-1 py-0.5 hover:bg-neutral-800 rounded cursor-pointer ml-4">
+                                <input
+                                  type="checkbox"
+                                  checked={pinFilter.categories.includes(subCatName)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setPinFilter({ ...pinFilter, categories: [...pinFilter.categories, subCatName] });
+                                    } else {
+                                      setPinFilter({ ...pinFilter, categories: pinFilter.categories.filter(c => c !== subCatName) });
+                                    }
+                                  }}
+                                  className="rounded border-neutral-700 bg-neutral-800 text-indigo-600 focus:ring-indigo-500"
+                                />
+                                <span className="text-[10px] text-neutral-400">{sub}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
                       ))}
                       {pinCategories.length === 0 && <div className="text-xs text-neutral-500 px-1">No categories defined</div>}
                     </div>
@@ -1506,23 +1615,44 @@ export default function Sidebar({
                           + Cat
                         </button>
                         {editingCategoriesId === point.id && (
-                          <div id={`category-dropdown-${point.id}`} className="absolute left-0 top-full mt-1 w-32 bg-neutral-900 border border-neutral-700 rounded shadow-xl z-10 p-1">
+                          <div id={`category-dropdown-${point.id}`} className="absolute left-0 top-full mt-1 w-40 bg-neutral-900 border border-neutral-700 rounded shadow-xl z-10 p-1 max-h-48 overflow-y-auto">
                             {pinCategories.map(cat => (
-                              <button
-                                key={cat}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const currentCats = point.categories || [];
-                                  const newCats = currentCats.includes(cat)
-                                    ? currentCats.filter(c => c !== cat)
-                                    : [...currentCats, cat];
-                                  onUpdatePointCategories(point.id, newCats);
-                                  setEditingCategoriesId(null);
-                                }}
-                                className={`w-full text-left text-[10px] px-2 py-1 rounded hover:bg-neutral-800 ${point.categories?.includes(cat) ? 'text-indigo-400' : 'text-neutral-400'}`}
-                              >
-                                {cat} {point.categories?.includes(cat) && '✓'}
-                              </button>
+                              <div key={cat.name} className="mb-1">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const currentCats = point.categories || [];
+                                    const newCats = currentCats.includes(cat.name)
+                                      ? currentCats.filter(c => c !== cat.name)
+                                      : [...currentCats, cat.name];
+                                    onUpdatePointCategories(point.id, newCats);
+                                    setEditingCategoriesId(null);
+                                  }}
+                                  className={`w-full text-left text-[10px] px-2 py-1 rounded hover:bg-neutral-800 font-medium ${point.categories?.includes(cat.name) ? 'text-indigo-400' : 'text-neutral-300'}`}
+                                >
+                                  {cat.name} {point.categories?.includes(cat.name) && '✓'}
+                                </button>
+                                {cat.subcategories.map(sub => {
+                                  const subCatName = `${cat.name}-${sub}`;
+                                  return (
+                                    <button
+                                      key={subCatName}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const currentCats = point.categories || [];
+                                        const newCats = currentCats.includes(subCatName)
+                                          ? currentCats.filter(c => c !== subCatName)
+                                          : [...currentCats, subCatName];
+                                        onUpdatePointCategories(point.id, newCats);
+                                        setEditingCategoriesId(null);
+                                      }}
+                                      className={`w-full text-left text-[10px] px-2 py-1 pl-4 rounded hover:bg-neutral-800 ${point.categories?.includes(subCatName) ? 'text-indigo-400' : 'text-neutral-400'}`}
+                                    >
+                                      {sub} {point.categories?.includes(subCatName) && '✓'}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             ))}
                             {pinCategories.length === 0 && <div className="text-[10px] text-neutral-500 px-2 py-1">No categories</div>}
                           </div>

@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import Viewer from './components/Viewer';
 import Sidebar from './components/Sidebar';
 import NotificationContainer, { NotificationItem, NotificationType } from './components/Notification';
+import WidgetPanel from './components/WidgetPanel';
 
 export type Point = {
   id: string;
@@ -15,6 +16,11 @@ export type Point = {
 export type SplatSource = {
   type: 'url' | 'file';
   value: string;
+};
+
+export type PinCategory = {
+  name: string;
+  subcategories: string[];
 };
 
 export type PinFilter = {
@@ -34,7 +40,10 @@ export default function App() {
   const [gridDivisions, setGridDivisions] = useState<number>(10);
   const [gridThickness, setGridThickness] = useState<number>(1.0);
   const [points, setPoints] = useState<Point[]>([]);
-  const [pinCategories, setPinCategories] = useState<string[]>(['Coral', 'Area']);
+  const [pinCategories, setPinCategories] = useState<PinCategory[]>([
+    { name: 'Coral', subcategories: ['Porites', 'Pavona'] },
+    { name: 'Area', subcategories: [] }
+  ]);
   const [pinFilter, setPinFilter] = useState<PinFilter>({ categories: [], matchAll: false });
   const [showPinCategories, setShowPinCategories] = useState<boolean>(false);
   const [renderQuality, setRenderQuality] = useState<'quality' | 'efficacy'>('quality');
@@ -55,12 +64,18 @@ export default function App() {
   const [isEraserMode, setIsEraserMode] = useState(false);
   const [brushSize, setBrushSize] = useState(0.5);
   const [eraserHistory, setEraserHistory] = useState<number[][]>([]);
-  const [erasedIndices, setErasedIndices] = useState<Set<number>>(new Set());
+  const [erasedIndices, setErasedIndices] = useState<Map<number, number>>(new Map());
+  const [originalColors, setOriginalColors] = useState<Map<number, number>>(new Map());
+
+  // Connection State
+  const [connectedPinIds, setConnectedPinIds] = useState<string[]>([]);
+  const [connectionLineColor, setConnectionLineColor] = useState<string>('#00ff00');
 
   useEffect(() => {
     setIsEraserMode(false);
     setEraserHistory([]);
-    setErasedIndices(new Set());
+    setErasedIndices(new Map());
+    setOriginalColors(new Map());
   }, [splatUrl]);
 
   useEffect(() => {
@@ -275,6 +290,7 @@ export default function App() {
     if (selectedPinId === id) {
       setSelectedPinId(null);
     }
+    setConnectedPinIds(prev => prev.filter(pinId => pinId !== id));
     addNotification('Pin deleted', 'info');
   };
 
@@ -357,7 +373,10 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-neutral-900 text-neutral-100 font-sans overflow-hidden select-none">
+    <div 
+      className="flex h-screen w-full bg-neutral-900 text-neutral-100 font-sans overflow-hidden select-none"
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <Sidebar
         splatUrl={splatUrl}
         setSplatUrl={setSplatUrl}
@@ -423,6 +442,8 @@ export default function App() {
         setEraserHistory={setEraserHistory}
         erasedIndices={erasedIndices}
         setErasedIndices={setErasedIndices}
+        originalColors={originalColors}
+        setOriginalColors={setOriginalColors}
       />
       <main className="flex-1 relative">
         <Viewer
@@ -463,6 +484,19 @@ export default function App() {
           setEraserHistory={setEraserHistory}
           erasedIndices={erasedIndices}
           setErasedIndices={setErasedIndices}
+          originalColors={originalColors}
+          setOriginalColors={setOriginalColors}
+          connectedPinIds={connectedPinIds}
+          connectionLineColor={connectionLineColor}
+        />
+        <WidgetPanel
+          points={points}
+          pinFilter={pinFilter}
+          pinCategories={pinCategories}
+          connectedPinIds={connectedPinIds}
+          setConnectedPinIds={setConnectedPinIds}
+          connectionLineColor={connectionLineColor}
+          setConnectionLineColor={setConnectionLineColor}
         />
         <NotificationContainer notifications={notifications} removeNotification={removeNotification} />
       </main>

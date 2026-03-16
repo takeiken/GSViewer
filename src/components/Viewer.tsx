@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Html, Grid, Splat, TransformControls, KeyboardControls, useKeyboardControls, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { Trash2 } from 'lucide-react';
-import { Point } from '../App';
+import type { Point, PinCategory } from '../App';
 
 type ViewerProps = {
   splatUrl: string;
@@ -31,7 +31,7 @@ type ViewerProps = {
   debugProxy: boolean;
   onUpdatePoints?: (updatedPoints: Point[]) => void;
   isAdjustingSplat?: boolean;
-  pinCategories?: string[];
+  pinCategories?: PinCategory[];
   onUpdatePointCategories?: (id: string, categories: string[]) => void;
   showPinCategories?: boolean;
   pinFilter?: { categories: string[], matchAll: boolean };
@@ -41,8 +41,12 @@ type ViewerProps = {
   brushSize?: number;
   eraserHistory?: number[][];
   setEraserHistory?: React.Dispatch<React.SetStateAction<number[][]>>;
-  erasedIndices?: Set<number>;
-  setErasedIndices?: React.Dispatch<React.SetStateAction<Set<number>>>;
+  erasedIndices?: Map<number, number>;
+  setErasedIndices?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
+  originalColors?: Map<number, number>;
+  setOriginalColors?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
+  connectedPinIds?: string[];
+  connectionLineColor?: string;
 };
 
 function Pin({ 
@@ -96,7 +100,7 @@ function Pin({
           emissive={isSelected ? "#ff4d4d" : "#ffffff"} 
           emissiveIntensity={isSelected ? 0.5 : 0.2} 
         />
-        <Html position={[0, 0.1, 0]} center className={`${isSelected ? 'z-50' : 'z-0'}`}>
+        <Html position={[0, 0.1, 0]} center zIndexRange={[40, 0]} className={`${isSelected ? 'z-40' : 'z-0'}`}>
           <div 
             className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap font-mono backdrop-blur-sm transition-colors cursor-pointer select-none ${isSelected ? 'bg-red-900/80 text-white border-red-700' : 'bg-neutral-900/80 text-neutral-300 border-neutral-700 hover:bg-neutral-800/80'}`}
             onClick={(e) => {
@@ -228,6 +232,10 @@ function ViewerScene({
   setEraserHistory,
   erasedIndices,
   setErasedIndices,
+  originalColors,
+  setOriginalColors,
+  connectedPinIds,
+  connectionLineColor,
   isCtrlPressed
 }: ViewerProps & { 
   isShiftPressed: boolean, 
@@ -297,6 +305,9 @@ function ViewerScene({
     return null;
   };
 
+  const originalColorsRef = useRef(new Map<number, number>());
+  const previouslyErasedIndicesRef = useRef(new Set<number>());
+
   useFrame(({ pointer }) => {
     // Throttle hover check
     const now = Date.now();
@@ -363,6 +374,9 @@ function ViewerScene({
                 
                 if (distSq <= brushLocalRadiusSq) {
                   // Erase! Clear alpha (top 8 bits)
+                  if (!originalColorsRef.current.has(i)) {
+                    originalColorsRef.current.set(i, colorUint);
+                  }
                   colorData[i * 4 + 3] = colorUint & 0x00FFFFFF;
                   currentStrokeRef.current.push(i);
                   modified = true;
@@ -440,11 +454,23 @@ function ViewerScene({
       if (isErasingRef.current) {
         isErasingRef.current = false;
         if (currentStrokeRef.current.length > 0) {
-          if (setEraserHistory && setErasedIndices) {
+          if (setEraserHistory && setErasedIndices && setOriginalColors) {
             setEraserHistory(prev => [...prev, [...currentStrokeRef.current]]);
             setErasedIndices(prev => {
-              const next = new Set(prev);
-              currentStrokeRef.current.forEach(idx => next.add(idx));
+              const next = new Map(prev);
+              currentStrokeRef.current.forEach(idx => {
+                const count = next.get(idx) || 0;
+                next.set(idx, count + 1);
+              });
+              return next;
+            });
+            setOriginalColors(prev => {
+              const next = new Map(prev);
+              originalColorsRef.current.forEach((color, idx) => {
+                if (!next.has(idx)) {
+                  next.set(idx, color);
+                }
+              });
               return next;
             });
           }
@@ -464,40 +490,46 @@ function ViewerScene({
 
   // Sync texture with erasedIndices (for Undo)
   useEffect(() => {
-    console.log('erasedIndices changed, size:', erasedIndices?.size);
     const splatMesh = groupRef.current?.children[0] as any;
     if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
       const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
       if (covAndColorTexture) {
         const colorData = covAndColorTexture.image.data; // Uint32Array
-        console.log('colorData type:', colorData.constructor.name);
-        const numSplats = colorData.length / 4;
         let modified = false;
-        let restoredCount = 0;
-        
-        for (let i = 0; i < numSplats; i++) {
-          const colorUint = colorData[i * 4 + 3];
-          const isErased = erasedIndices?.has(i);
-          const currentAlpha = colorUint >>> 24;
-          
-          if (isErased && currentAlpha !== 0) {
-            colorData[i * 4 + 3] = colorUint & 0x00FFFFFF;
+
+        const currentlyErased = new Set(Array.from(erasedIndices?.keys() || []).filter(i => (erasedIndices?.get(i) || 0) > 0));
+
+        // Find splats to restore: in previouslyErased but not in currentlyErased
+        previouslyErasedIndicesRef.current.forEach(i => {
+          if (!currentlyErased.has(i)) {
+            const offset = i * 4;
+            const colorUint = colorData[offset + 3];
+            // Restore
+            const originalColor = originalColorsRef.current.get(i) ?? originalColors?.get(i) ?? (colorUint | 0xFF000000);
+            colorData[offset + 3] = originalColor;
             modified = true;
-          } else if (!isErased && currentAlpha === 0) {
-            // Restore alpha to 255
-            colorData[i * 4 + 3] = (colorUint & 0x00FFFFFF) | 0xFF000000;
-            modified = true;
-            restoredCount++;
           }
-        }
-        
-        console.log('Restored splats:', restoredCount);
+        });
+
+        // Find splats to erase: in currentlyErased but not in previouslyErased
+        currentlyErased.forEach(i => {
+          if (!previouslyErasedIndicesRef.current.has(i)) {
+            const offset = i * 4;
+            const colorUint = colorData[offset + 3];
+            // Erase
+            colorData[offset + 3] = colorUint & 0x00FFFFFF;
+            modified = true;
+          }
+        });
+
+        previouslyErasedIndicesRef.current = currentlyErased;
+
         if (modified) {
           covAndColorTexture.needsUpdate = true;
         }
       }
     }
-  }, [erasedIndices]);
+  }, [erasedIndices, originalColors]);
 
   const debugProxyRef = useRef(debugProxy);
   useEffect(() => {
@@ -779,35 +811,83 @@ function ViewerScene({
             isEraserMode={isEraserMode}
           />
         ))}
+
+        {/* Connection Lines */}
+        {(() => {
+          if (!connectedPinIds || connectedPinIds.length < 2) return null;
+          const validPoints = connectedPinIds
+            .map(id => points.find(p => p.id === id)?.position)
+            .filter((pos): pos is [number, number, number] => pos !== undefined);
+          
+          if (validPoints.length < 2) return null;
+          
+          // If 3 or more points, close the loop by adding the first point to the end
+          const linePoints = validPoints.length >= 3 
+            ? [...validPoints, validPoints[0]] 
+            : validPoints;
+          
+          return (
+            <Line
+              points={linePoints}
+              color={connectionLineColor || '#00ff00'}
+              lineWidth={3}
+              dashed={false}
+            />
+          );
+        })()}
+
         {/* Category Dropdown and Delete Option for Selected Pin */}
         {selectedPinId && showDropdown && pinCategories && onUpdatePointCategories && (
-          <Html position={points.find(p => p.id === selectedPinId)?.position || [0,0,0]} style={{ pointerEvents: 'none' }}>
+          <Html position={points.find(p => p.id === selectedPinId)?.position || [0,0,0]} zIndexRange={[45, 0]} style={{ pointerEvents: 'none' }}>
             {/* Categories (Right) */}
             <div 
-              className="absolute left-4 top-0 bg-neutral-900 border border-neutral-700 rounded shadow-xl p-1 w-32 pointer-events-auto"
+              className="absolute left-4 top-0 bg-neutral-900 border border-neutral-700 rounded shadow-xl p-1 w-40 pointer-events-auto max-h-48 overflow-y-auto"
               onPointerDown={(e) => e.stopPropagation()}
             >
               <div className="text-[10px] text-neutral-500 px-2 py-1 border-b border-neutral-800 mb-1">Categories</div>
               {pinCategories.map(cat => {
                 const point = points.find(p => p.id === selectedPinId);
-                const isSelected = point?.categories?.includes(cat);
+                const isSelected = point?.categories?.includes(cat.name);
                 return (
-                  <button
-                    key={cat}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (point) {
-                        const currentCats = point.categories || [];
-                        const newCats = isSelected
-                          ? currentCats.filter(c => c !== cat)
-                          : [...currentCats, cat];
-                        onUpdatePointCategories(point.id, newCats);
-                      }
-                    }}
-                    className={`w-full text-left text-[10px] px-2 py-1 rounded hover:bg-neutral-800 ${isSelected ? 'text-indigo-400' : 'text-neutral-400'}`}
-                  >
-                    {cat} {isSelected && '✓'}
-                  </button>
+                  <div key={cat.name} className="mb-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (point) {
+                          const currentCats = point.categories || [];
+                          const newCats = isSelected
+                            ? currentCats.filter(c => c !== cat.name)
+                            : [...currentCats, cat.name];
+                          onUpdatePointCategories(point.id, newCats);
+                        }
+                      }}
+                      className={`w-full text-left text-[10px] px-2 py-1 rounded hover:bg-neutral-800 font-medium ${isSelected ? 'text-indigo-400' : 'text-neutral-300'}`}
+                    >
+                      {cat.name} {isSelected && '✓'}
+                    </button>
+                    {cat.subcategories.map(sub => {
+                      const subCatName = `${cat.name}-${sub}`;
+                      const isSubSelected = point?.categories?.includes(subCatName);
+                      return (
+                        <button
+                          key={subCatName}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (point) {
+                              const currentCats = point.categories || [];
+                              const newCats = isSubSelected
+                                ? currentCats.filter(c => c !== subCatName)
+                                : [...currentCats, subCatName];
+                              onUpdatePointCategories(point.id, newCats);
+                            }
+                          }}
+                          className={`w-full text-left text-[10px] px-2 py-1 pl-4 rounded hover:bg-neutral-800 ${isSubSelected ? 'text-indigo-400' : 'text-neutral-400'}`}
+                        >
+                          {sub} {isSubSelected && '✓'}
+                        </button>
+                      );
+                    })}
+                  </div>
                 );
               })}
               {pinCategories.length === 0 && <div className="text-[10px] text-neutral-500 px-2 py-1">No categories</div>}
@@ -992,8 +1072,12 @@ export default function Viewer(props: ViewerProps) {
           if (lastStroke) {
             props.setEraserHistory(newHistory);
             props.setErasedIndices(prev => {
-              const next = new Set(prev);
-              lastStroke.forEach(idx => next.delete(idx));
+              const next = new Map(prev);
+              lastStroke.forEach(idx => {
+                const count = next.get(idx) || 0;
+                if (count <= 1) next.delete(idx);
+                else next.set(idx, count - 1);
+              });
               return next;
             });
           }
