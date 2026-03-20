@@ -47,10 +47,13 @@ type SidebarProps = {
   calibrationPoints: [number, number, number][];
   onStartCalibration: () => void;
   onCancelCalibration: () => void;
-  onApplyCalibration: (distance: number) => void;
+  onApplyCalibration: (distance: number, wgs1?: {lat: number, lng: number}, wgs2?: {lat: number, lng: number}) => void;
   onRecreateProxy: () => void;
+  onRemoveRedProxies: () => void;
   debugProxy: boolean;
   setDebugProxy: (debug: boolean) => void;
+  proxyDistributionThreshold: number;
+  setProxyDistributionThreshold: (threshold: number) => void;
   onInteractionStart: () => void;
   onInteractionEnd: () => void;
   pinCategories: PinCategory[];
@@ -60,6 +63,8 @@ type SidebarProps = {
   onUpdatePointCategories: (id: string, categories: string[]) => void;
   showPinCategories: boolean;
   setShowPinCategories: (show: boolean) => void;
+  showFullCategories: boolean;
+  setShowFullCategories: (show: boolean) => void;
   renderQuality: 'quality' | 'efficacy';
   setRenderQuality: (quality: 'quality' | 'efficacy') => void;
   isEraserMode: boolean;
@@ -72,6 +77,12 @@ type SidebarProps = {
   setErasedIndices: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   originalColors: Map<number, number>;
   setOriginalColors: React.Dispatch<React.SetStateAction<Map<number, number>>>;
+  wgs84Calibration: {
+    p1: [number, number, number];
+    p2: [number, number, number];
+    wgs1: { lat: number; lng: number };
+    wgs2: { lat: number; lng: number };
+  } | null;
 };
 
 const BufferedInput = ({ 
@@ -164,8 +175,11 @@ export default function Sidebar({
   onCancelCalibration,
   onApplyCalibration,
   onRecreateProxy,
+  onRemoveRedProxies,
   debugProxy,
   setDebugProxy,
+  proxyDistributionThreshold,
+  setProxyDistributionThreshold,
   onInteractionStart,
   onInteractionEnd,
   pinCategories,
@@ -175,6 +189,8 @@ export default function Sidebar({
   onUpdatePointCategories,
   showPinCategories,
   setShowPinCategories,
+  showFullCategories,
+  setShowFullCategories,
   renderQuality,
   setRenderQuality,
   isEraserMode,
@@ -187,6 +203,7 @@ export default function Sidebar({
   setErasedIndices,
   originalColors,
   setOriginalColors,
+  wgs84Calibration,
 }: SidebarProps) {
   const [inputUrl, setInputUrl] = useState(splatUrl);
   const [editingNameId, setEditingNameId] = useState<string | null>(null);
@@ -195,10 +212,20 @@ export default function Sidebar({
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [pendingImportSettings, setPendingImportSettings] = useState<any>(null);
   const [calibrationDistance, setCalibrationDistance] = useState<string>("1.0");
+  const [wgs1Lat, setWgs1Lat] = useState<string>("");
+  const [wgs1Lng, setWgs1Lng] = useState<string>("");
+  const [wgs2Lat, setWgs2Lat] = useState<string>("");
+  const [wgs2Lng, setWgs2Lng] = useState<string>("");
   const [newCategoryName, setNewCategoryName] = useState('');
   const [showFilter, setShowFilter] = useState(false);
   const [editingCategoriesId, setEditingCategoriesId] = useState<string | null>(null);
-  const [exportFileName, setExportFileName] = useState('cleaned_model.splat');
+  const [splatExportFileName, setSplatExportFileName] = useState('cleaned_model.splat');
+  const [settingsExportFileName, setSettingsExportFileName] = useState('splat-view-settings.json');
+  const [localProxyThreshold, setLocalProxyThreshold] = useState(proxyDistributionThreshold);
+
+  useEffect(() => {
+    setLocalProxyThreshold(proxyDistributionThreshold);
+  }, [proxyDistributionThreshold]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -233,6 +260,39 @@ export default function Sidebar({
     if (gridSize === 0) return "---";
     const realVal = val * gridDivisions / (10 * gridSize);
     return realVal.toFixed(3) + "m";
+  };
+
+  const calculateWGS84 = (position: [number, number, number]) => {
+    if (!wgs84Calibration) return null;
+    const { p1, p2, wgs1, wgs2 } = wgs84Calibration;
+    
+    const dx = p2[0] - p1[0];
+    const dz = p2[2] - p1[2];
+    
+    const dlng = wgs2.lng - wgs1.lng;
+    const dlat = wgs2.lat - wgs1.lat;
+    
+    const angle3d = Math.atan2(dz, dx);
+    const angleWgs = Math.atan2(dlat, dlng);
+    const angleDiff = angleWgs - angle3d;
+    
+    const dist3d = Math.sqrt(dx * dx + dz * dz);
+    const distWgs = Math.sqrt(dlng * dlng + dlat * dlat);
+    
+    if (dist3d === 0) return null;
+    
+    const scale = distWgs / dist3d;
+    
+    const px = position[0] - p1[0];
+    const pz = position[2] - p1[2];
+    
+    const rx = px * Math.cos(angleDiff) - pz * Math.sin(angleDiff);
+    const rz = px * Math.sin(angleDiff) + pz * Math.cos(angleDiff);
+    
+    const finalLng = wgs1.lng + rx * scale;
+    const finalLat = wgs1.lat + rz * scale;
+    
+    return { lat: finalLat, lng: finalLng };
   };
 
   const resetField = (field: string, defaultValue: any, setter: (val: any) => void) => {
@@ -277,14 +337,22 @@ export default function Sidebar({
           unit: 'meters'
         } : null
       })),
-      pinCategories
+      pinCategories,
+      showPinCategories,
+      showFullCategories
     };
     
     const blob = new Blob([JSON.stringify(settings, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = exportFileName.trim() ? `${exportFileName.trim()}.json` : 'splat-viewer-settings.json';
+    
+    let finalName = settingsExportFileName.trim() || 'splat-view-settings.json';
+    if (!finalName.toLowerCase().endsWith('.json')) {
+      finalName += '.json';
+    }
+    a.download = finalName;
+    
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -313,7 +381,7 @@ export default function Sidebar({
   const confirmImport = () => {
     if (pendingImportSettings) {
       onImportSettings(pendingImportSettings);
-      setExportFileName(''); // Clear export filename on import
+      setSettingsExportFileName(''); // Clear export filename on import
       setShowImportConfirm(false);
       setPendingImportSettings(null);
     }
@@ -329,7 +397,7 @@ export default function Sidebar({
         setSplatUrl(url);
         setInputUrl(url);
         setSplatSource({ type: 'file', value: file.name });
-        setExportFileName(''); // Clear export filename
+        setSplatExportFileName(''); // Clear export filename
       } else if (file.name.endsWith('.ply')) {
         const stream = file.stream();
         const result = await spz.loadPly(stream);
@@ -339,7 +407,7 @@ export default function Sidebar({
         setSplatUrl(url);
         setInputUrl(file.name);
         setSplatSource({ type: 'file', value: file.name });
-        setExportFileName(''); // Clear export filename
+        setSplatExportFileName(''); // Clear export filename
       } else if (file.name.endsWith('.spz')) {
         const buffer = await file.arrayBuffer();
         const result = await spz.loadSpz(new Uint8Array(buffer));
@@ -349,7 +417,7 @@ export default function Sidebar({
         setSplatUrl(url);
         setInputUrl(file.name);
         setSplatSource({ type: 'file', value: file.name });
-        setExportFileName(''); // Clear export filename
+        setSplatExportFileName(''); // Clear export filename
       } else {
         addNotification('Unsupported file format. Please upload .splat, .ply, or .spz files.', 'error');
       }
@@ -418,7 +486,13 @@ export default function Sidebar({
       
       const a = document.createElement('a');
       a.href = url;
-      a.download = exportFileName || 'cleaned_model.splat';
+      
+      let finalName = splatExportFileName.trim() || 'cleaned_model.splat';
+      if (!finalName.toLowerCase().endsWith('.splat')) {
+        finalName += '.splat';
+      }
+      a.download = finalName;
+      
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -538,7 +612,7 @@ export default function Sidebar({
                         setSplatUrl(inputUrl);
                       }
                       setSplatSource({ type: 'url', value: inputUrl });
-                      setExportFileName(''); // Clear export filename
+                      setSplatExportFileName(''); // Clear export filename
                       addNotification('URL loaded successfully', 'success');
                     } catch (error) {
                       console.error('Error loading URL:', error);
@@ -564,24 +638,6 @@ export default function Sidebar({
               </button>
             </div>
             
-            <div className="flex gap-2 mt-2">
-              <button 
-                onClick={onRecreateProxy}
-                className="flex-1 flex items-center justify-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 py-2 px-2 rounded-md text-sm transition-colors border border-neutral-700"
-                title="Recreate Proxy Mesh"
-              >
-                <RotateCcw size={16} />
-                Recreate
-              </button>
-              <button 
-                onClick={() => setDebugProxy(!debugProxy)}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 px-2 rounded-md text-sm transition-colors border ${debugProxy ? 'bg-indigo-900/50 border-indigo-500 text-indigo-200' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'}`}
-                title="Toggle Proxy Visibility"
-              >
-                {debugProxy ? 'Hide Proxy' : 'Show Proxy'}
-              </button>
-            </div>
-            
             <div className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded px-2 py-1.5">
               <label className="text-xs text-neutral-400">Render Mode</label>
               <div className="flex bg-neutral-800 rounded p-0.5">
@@ -602,6 +658,171 @@ export default function Sidebar({
           </div>
         </section>
 
+        {/* Splat Proxy */}
+        <section className="space-y-4">
+          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Splat Proxy</h2>
+          <div className="space-y-3">
+            <div className="flex gap-2">
+              <button 
+                onClick={onRecreateProxy}
+                className="flex-1 flex items-center justify-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 py-2 px-2 rounded-md text-sm transition-colors border border-neutral-700"
+                title="Recreate Proxy Mesh"
+              >
+                <RotateCcw size={16} />
+                Recreate
+              </button>
+              <button 
+                onClick={onRemoveRedProxies}
+                className="flex-1 flex items-center justify-center gap-2 bg-red-900/50 hover:bg-red-800/50 text-red-200 py-2 px-2 rounded-md text-sm transition-colors border border-red-700/50"
+                title="Remove Red Proxies"
+              >
+                <Trash2 size={16} />
+                Remove Red
+              </button>
+              <button 
+                onClick={() => setDebugProxy(!debugProxy)}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 px-2 rounded-md text-sm transition-colors border ${debugProxy ? 'bg-indigo-900/50 border-indigo-500 text-indigo-200' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'}`}
+                title="Toggle Proxy Visibility"
+              >
+                {debugProxy ? 'Hide Proxy' : 'Show Proxy'}
+              </button>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <label className="text-xs text-neutral-400">Proxy distribution threshold</label>
+                <span className="text-xs text-neutral-500">{localProxyThreshold.toFixed(2)}</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.01" 
+                max="2.0" 
+                step="0.01"
+                value={localProxyThreshold}
+                onChange={(e) => setLocalProxyThreshold(parseFloat(e.target.value))}
+                onMouseUp={() => setProxyDistributionThreshold(localProxyThreshold)}
+                onTouchEnd={() => setProxyDistributionThreshold(localProxyThreshold)}
+                onKeyUp={() => setProxyDistributionThreshold(localProxyThreshold)}
+                className="w-full accent-indigo-500"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Edit Tools */}
+        <section className="space-y-4">
+          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Edit Tools</h2>
+          <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-neutral-300">Eraser Mode</span>
+              <button
+                onClick={() => setIsEraserMode(!isEraserMode)}
+                className={`w-10 h-5 rounded-full relative transition-colors ${isEraserMode ? 'bg-indigo-500' : 'bg-neutral-700'}`}
+              >
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${isEraserMode ? 'translate-x-5.5' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+
+            {isEraserMode && (
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs text-neutral-400">Brush Size</label>
+                  <span className="text-[10px] text-neutral-500 font-mono">{brushSize.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.01"
+                  max="2"
+                  step="0.01"
+                  value={brushSize}
+                  onChange={(e) => setBrushSize(parseFloat(e.target.value))}
+                  className="w-full accent-indigo-500"
+                />
+              </div>
+            )}
+
+            {isEraserMode && (
+              <div className="space-y-2">
+                <label className="text-xs text-neutral-400">Export File Name</label>
+                <input
+                  type="text"
+                  value={splatExportFileName}
+                  onChange={(e) => setSplatExportFileName(e.target.value)}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
+                  placeholder="cleaned_model.splat"
+                />
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowResetConfirm(true)}
+                disabled={erasedIndices.size === 0}
+                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
+                  erasedIndices.size === 0
+                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+                }`}
+              >
+                <Trash2 size={12} /> Reset
+              </button>
+
+              <button
+                onClick={() => {
+                  if (eraserHistory.length > 0) {
+                    const lastStroke = eraserHistory[eraserHistory.length - 1];
+                    setEraserHistory(prev => prev.slice(0, -1));
+                    
+                    let indicesToRemove: number[] = [];
+                    
+                    setErasedIndices(prev => {
+                      const next = new Map(prev);
+                      lastStroke.forEach(idx => {
+                        const count = next.get(idx) || 0;
+                        if (count <= 1) {
+                          next.delete(idx);
+                          indicesToRemove.push(idx);
+                        }
+                        else next.set(idx, count - 1);
+                      });
+                      return next;
+                    });
+                    
+                    if (indicesToRemove.length > 0) {
+                      setOriginalColors(prevColors => {
+                        const nextColors = new Map(prevColors);
+                        indicesToRemove.forEach(idx => nextColors.delete(idx));
+                        return nextColors;
+                      });
+                    }
+                    
+                    addNotification(`Undid ${lastStroke.length} erased splats`, 'info');
+                  }
+                }}
+                disabled={eraserHistory.length === 0}
+                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
+                  eraserHistory.length === 0
+                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+                }`}
+              >
+                <RotateCcw size={12} /> Undo
+              </button>
+              
+              <button
+                onClick={handleExportSplat}
+                disabled={erasedIndices.size === 0}
+                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
+                  erasedIndices.size === 0
+                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                    : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                }`}
+              >
+                <Download size={12} /> Export
+              </button>
+            </div>
+          </div>
+        </section>
+
         {/* Export/Import Setting */}
         <section className="space-y-4">
           <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Settings</h2>
@@ -610,9 +831,9 @@ export default function Sidebar({
               <label className="block text-xs text-neutral-500 mb-1">Export Filename (Optional)</label>
               <input
                 type="text"
-                value={exportFileName}
-                onChange={(e) => setExportFileName(e.target.value)}
-                placeholder="splat-viewer-settings"
+                value={settingsExportFileName}
+                onChange={(e) => setSettingsExportFileName(e.target.value)}
+                placeholder="splat-view-settings.json"
                 className="w-full bg-neutral-900 border border-neutral-800 rounded-md px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
@@ -987,9 +1208,9 @@ export default function Sidebar({
                   </div>
                   
                   {calibrationPoints.length === 2 && (
-                    <div>
-                      <label className="text-[10px] text-neutral-500 block mb-1">Real Distance (meters)</label>
-                      <div className="flex gap-2">
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-[10px] text-neutral-500 block mb-1">Real Distance (meters)</label>
                         <input 
                           type="number" 
                           min="0.01" 
@@ -1002,28 +1223,85 @@ export default function Sidebar({
                               setCalibrationDistance(val.toString());
                             }
                           }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              const val = parseFloat(calibrationDistance);
-                              if (!isNaN(val) && val > 0) {
-                                onApplyCalibration(val);
+                          className="w-full bg-neutral-950 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-200"
+                        />
+                      </div>
+                      
+                      <div className="space-y-2 border-t border-neutral-800 pt-2">
+                        <label className="text-[10px] text-neutral-500 block">Start WGS84 (Lat, Lng)</label>
+                        <div className="flex gap-1">
+                          <input 
+                            type="number" 
+                            placeholder="Lat"
+                            value={wgs1Lat}
+                            onChange={(e) => setWgs1Lat(e.target.value)}
+                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                          />
+                          <input 
+                            type="number" 
+                            placeholder="Lng"
+                            value={wgs1Lng}
+                            onChange={(e) => setWgs1Lng(e.target.value)}
+                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] text-neutral-500 block">End WGS84 (Lat, Lng)</label>
+                        <div className="flex gap-1">
+                          <input 
+                            type="number" 
+                            placeholder="Lat"
+                            value={wgs2Lat}
+                            onChange={(e) => setWgs2Lat(e.target.value)}
+                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                          />
+                          <input 
+                            type="number" 
+                            placeholder="Lng"
+                            value={wgs2Lng}
+                            onChange={(e) => setWgs2Lng(e.target.value)}
+                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                          />
+                        </div>
+                      </div>
+
+                      <button 
+                        onClick={() => {
+                          const val = parseFloat(calibrationDistance);
+                          if (!isNaN(val) && val > 0) {
+                            const wgsFields = [wgs1Lat, wgs1Lng, wgs2Lat, wgs2Lng];
+                            const filledCount = wgsFields.filter(f => f.trim() !== "").length;
+                            
+                            if (filledCount > 0 && filledCount < 4) {
+                              addNotification('Please fill all WGS84 fields or leave them all empty.', 'error');
+                              return;
+                            }
+
+                            let wgs1, wgs2;
+                            if (filledCount === 4) {
+                              const lat1 = parseFloat(wgs1Lat);
+                              const lng1 = parseFloat(wgs1Lng);
+                              const lat2 = parseFloat(wgs2Lat);
+                              const lng2 = parseFloat(wgs2Lng);
+                              if (!isNaN(lat1) && !isNaN(lng1) && !isNaN(lat2) && !isNaN(lng2)) {
+                                wgs1 = { lat: lat1, lng: lng1 };
+                                wgs2 = { lat: lat2, lng: lng2 };
+                              } else {
+                                addNotification('Invalid WGS84 coordinates.', 'error');
+                                return;
                               }
                             }
-                          }}
-                          className="flex-1 bg-neutral-950 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-200"
-                        />
-                        <button 
-                          onClick={() => {
-                            const val = parseFloat(calibrationDistance);
-                            if (!isNaN(val) && val > 0) {
-                              onApplyCalibration(val);
-                            }
-                          }}
-                          className="bg-green-600 hover:bg-green-500 text-white px-2 py-1 rounded text-xs"
-                        >
-                          Apply
-                        </button>
-                      </div>
+                            onApplyCalibration(val, wgs1, wgs2);
+                          } else {
+                            addNotification('Please enter a valid distance.', 'error');
+                          }
+                        }}
+                        className="w-full bg-green-600 hover:bg-green-500 text-white px-2 py-1.5 rounded text-xs transition-colors"
+                      >
+                        Apply Calibration
+                      </button>
                     </div>
                   )}
 
@@ -1273,121 +1551,6 @@ export default function Sidebar({
           </div>
         </section>
 
-        {/* Edit Tools */}
-        <section className="space-y-4">
-          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Edit Tools</h2>
-          <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-300">Eraser Mode</span>
-              <button
-                onClick={() => setIsEraserMode(!isEraserMode)}
-                className={`w-10 h-5 rounded-full relative transition-colors ${isEraserMode ? 'bg-indigo-500' : 'bg-neutral-700'}`}
-              >
-                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${isEraserMode ? 'translate-x-5.5' : 'translate-x-0.5'}`} />
-              </button>
-            </div>
-
-            {isEraserMode && (
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-xs text-neutral-400">Brush Size</label>
-                  <span className="text-[10px] text-neutral-500 font-mono">{brushSize.toFixed(2)}</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.01"
-                  max="2"
-                  step="0.01"
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(parseFloat(e.target.value))}
-                  className="w-full accent-indigo-500"
-                />
-              </div>
-            )}
-
-            {isEraserMode && (
-              <div className="space-y-2">
-                <label className="text-xs text-neutral-400">Export File Name</label>
-                <input
-                  type="text"
-                  value={exportFileName}
-                  onChange={(e) => setExportFileName(e.target.value)}
-                  className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
-                  placeholder="cleaned_model.splat"
-                />
-              </div>
-            )}
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowResetConfirm(true)}
-                disabled={erasedIndices.size === 0}
-                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
-                  erasedIndices.size === 0
-                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
-                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
-                }`}
-              >
-                <Trash2 size={12} /> Reset
-              </button>
-
-              <button
-                onClick={() => {
-                  if (eraserHistory.length > 0) {
-                    const lastStroke = eraserHistory[eraserHistory.length - 1];
-                    setEraserHistory(prev => prev.slice(0, -1));
-                    
-                    let indicesToRemove: number[] = [];
-                    
-                    setErasedIndices(prev => {
-                      const next = new Map(prev);
-                      lastStroke.forEach(idx => {
-                        const count = next.get(idx) || 0;
-                        if (count <= 1) {
-                          next.delete(idx);
-                          indicesToRemove.push(idx);
-                        }
-                        else next.set(idx, count - 1);
-                      });
-                      return next;
-                    });
-                    
-                    if (indicesToRemove.length > 0) {
-                      setOriginalColors(prevColors => {
-                        const nextColors = new Map(prevColors);
-                        indicesToRemove.forEach(idx => nextColors.delete(idx));
-                        return nextColors;
-                      });
-                    }
-                    
-                    addNotification(`Undid ${lastStroke.length} erased splats`, 'info');
-                  }
-                }}
-                disabled={eraserHistory.length === 0}
-                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
-                  eraserHistory.length === 0
-                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
-                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
-                }`}
-              >
-                <RotateCcw size={12} /> Undo
-              </button>
-              
-              <button
-                onClick={handleExportSplat}
-                disabled={erasedIndices.size === 0}
-                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
-                  erasedIndices.size === 0
-                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                }`}
-              >
-                <Download size={12} /> Export
-              </button>
-            </div>
-          </div>
-        </section>
-
         {/* Points Controls */}
         <section className="space-y-4">
           <div className="flex items-center justify-between">
@@ -1473,7 +1636,7 @@ export default function Sidebar({
             </div>
           </div>
           
-          <div className="flex items-center justify-between px-1">
+          <div className="flex flex-col gap-2 px-1">
             <label className="text-xs text-neutral-500 flex items-center gap-2 cursor-pointer">
               <input 
                 type="checkbox" 
@@ -1483,6 +1646,17 @@ export default function Sidebar({
               />
               Show Categories on Pins
             </label>
+            {showPinCategories && (
+              <label className="text-xs text-neutral-500 flex items-center gap-2 cursor-pointer ml-4">
+                <input 
+                  type="checkbox" 
+                  checked={showFullCategories} 
+                  onChange={(e) => setShowFullCategories(e.target.checked)}
+                  className="rounded border-neutral-700 bg-neutral-800 text-indigo-600 focus:ring-indigo-500"
+                />
+                Show full categories on Pins
+              </label>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -1492,10 +1666,18 @@ export default function Sidebar({
                    ? `Showing ${points.filter(p => {
                         if (pinFilter.categories.length === 0) return true;
                         const pointCats = p.categories || [];
+                        const hasCategoryOrSub = (filterCat: string) => {
+                          if (pointCats.includes(filterCat)) return true;
+                          const parentCat = pinCategories.find(c => c.name === filterCat);
+                          if (parentCat) {
+                            return parentCat.subcategories.some(sub => pointCats.includes(`${parentCat.name}-${sub}`));
+                          }
+                          return false;
+                        };
                         if (pinFilter.matchAll) {
-                          return pinFilter.categories.every(c => pointCats.includes(c));
+                          return pinFilter.categories.every(hasCategoryOrSub);
                         } else {
-                          return pinFilter.categories.some(c => pointCats.includes(c));
+                          return pinFilter.categories.some(hasCategoryOrSub);
                         }
                       }).length} of ${points.length} pins`
                    : `${points.length} pins created`
@@ -1514,10 +1696,18 @@ export default function Sidebar({
             {points.filter(p => {
                 if (pinFilter.categories.length === 0) return true;
                 const pointCats = p.categories || [];
+                const hasCategoryOrSub = (filterCat: string) => {
+                  if (pointCats.includes(filterCat)) return true;
+                  const parentCat = pinCategories.find(c => c.name === filterCat);
+                  if (parentCat) {
+                    return parentCat.subcategories.some(sub => pointCats.includes(`${parentCat.name}-${sub}`));
+                  }
+                  return false;
+                };
                 if (pinFilter.matchAll) {
-                  return pinFilter.categories.every(c => pointCats.includes(c));
+                  return pinFilter.categories.every(hasCategoryOrSub);
                 } else {
-                  return pinFilter.categories.some(c => pointCats.includes(c));
+                  return pinFilter.categories.some(hasCategoryOrSub);
                 }
               }).length === 0 ? (
               <p className="text-xs text-neutral-500 italic">No pins found.</p>
@@ -1526,10 +1716,18 @@ export default function Sidebar({
                 {points.filter(p => {
                     if (pinFilter.categories.length === 0) return true;
                     const pointCats = p.categories || [];
+                    const hasCategoryOrSub = (filterCat: string) => {
+                      if (pointCats.includes(filterCat)) return true;
+                      const parentCat = pinCategories.find(c => c.name === filterCat);
+                      if (parentCat) {
+                        return parentCat.subcategories.some(sub => pointCats.includes(`${parentCat.name}-${sub}`));
+                      }
+                      return false;
+                    };
                     if (pinFilter.matchAll) {
-                      return pinFilter.categories.every(c => pointCats.includes(c));
+                      return pinFilter.categories.every(hasCategoryOrSub);
                     } else {
-                      return pinFilter.categories.some(c => pointCats.includes(c));
+                      return pinFilter.categories.some(hasCategoryOrSub);
                     }
                   }).map((point, index) => (
                   <div 
@@ -1599,7 +1797,7 @@ export default function Sidebar({
                           className="flex items-center gap-1 text-[10px] bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-neutral-300 px-1.5 py-0.5 rounded border border-neutral-700 transition-colors"
                           title={`Remove ${cat}`}
                         >
-                          {cat}
+                          {showFullCategories ? cat : (cat.split('-').length > 1 ? cat.split('-').slice(1).join('-') : cat)}
                           <X size={8} />
                         </button>
                       ))}
@@ -1700,6 +1898,20 @@ export default function Sidebar({
                         <span className="text-[10px] text-neutral-300 font-mono text-right">{toReal(point.position[2])}</span>
                       </div>
                     </div>
+                    {wgs84Calibration && (
+                      <div className="mt-1 pt-1 border-t border-neutral-800 flex flex-col">
+                        <span className="text-[9px] text-neutral-500 font-mono">WGS84 Coordinate</span>
+                        <input 
+                          type="text" 
+                          readOnly 
+                          value={(() => {
+                            const wgs = calculateWGS84(point.position);
+                            return wgs ? `${wgs.lat.toFixed(6)}, ${wgs.lng.toFixed(6)}` : '---';
+                          })()}
+                          className="w-full bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[10px] text-neutral-300 font-mono focus:outline-none"
+                        />
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

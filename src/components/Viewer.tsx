@@ -1,4 +1,4 @@
-import { useRef, Suspense, useEffect, useState } from 'react';
+import { useRef, Suspense, useEffect, useState, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Html, Grid, Splat, TransformControls, KeyboardControls, useKeyboardControls, Line } from '@react-three/drei';
 import * as THREE from 'three';
@@ -28,12 +28,15 @@ type ViewerProps = {
   onCalibrationPointClick?: (point: [number, number, number]) => void;
   onUpdateCalibrationPoint?: (index: number, point: [number, number, number]) => void;
   recreateProxyTrigger: number;
+  removeRedProxiesTrigger: number;
   debugProxy: boolean;
+  proxyDistributionThreshold: number;
   onUpdatePoints?: (updatedPoints: Point[]) => void;
   isAdjustingSplat?: boolean;
   pinCategories?: PinCategory[];
   onUpdatePointCategories?: (id: string, categories: string[]) => void;
   showPinCategories?: boolean;
+  showFullCategories?: boolean;
   pinFilter?: { categories: string[], matchAll: boolean };
   renderQuality?: 'quality' | 'efficacy';
   onDeletePoint?: (id: string) => void;
@@ -57,6 +60,7 @@ function Pin({
   index,
   isAdjustingSplat,
   showCategories,
+  showFullCategories,
   onContextMenu,
   isEraserMode
 }: { 
@@ -67,20 +71,43 @@ function Pin({
   index?: number;
   isAdjustingSplat?: boolean;
   showCategories?: boolean;
+  showFullCategories?: boolean;
   onContextMenu?: (e: any) => void;
   isEraserMode?: boolean;
 }) {
-  const meshRef = useRef<THREE.Mesh>(null);
-  
-  const label = showCategories && point.categories && point.categories.length > 0
-    ? `${point.name} (${point.categories.join(', ')})`
+  const formattedCategories = point.categories?.map(cat => {
+    if (showFullCategories) return cat;
+    const parts = cat.split('-');
+    return parts.length > 1 ? parts.slice(1).join('-') : cat;
+  }) || [];
+
+  const label = showCategories && formattedCategories.length > 0
+    ? `${point.name} (${formattedCategories.join(', ')})`
     : point.name;
 
+  const isControlsVisible = isSelected && !isAdjustingSplat && !isEraserMode;
+
   return (
-    <>
+    <TransformControls
+      mode="translate"
+      space="world"
+      size={0.5}
+      showX={isControlsVisible}
+      showY={isControlsVisible}
+      showZ={isControlsVisible}
+      enabled={isControlsVisible}
+      position={point.position}
+      onMouseDown={() => {
+        if (onContextMenu) onContextMenu({ type: 'startMove' });
+      }}
+      onMouseUp={(e: any) => {
+        if (e.target && e.target.object) {
+          const pos = e.target.object.position;
+          onUpdate(point.id, [pos.x, pos.y, pos.z]);
+        }
+      }}
+    >
       <mesh 
-        ref={meshRef} 
-        position={point.position} 
         onClick={(e) => {
           if (isEraserMode) return;
           e.stopPropagation();
@@ -121,29 +148,7 @@ function Pin({
           </div>
         </Html>
       </mesh>
-      
-      {isSelected && !isAdjustingSplat && !isEraserMode && (
-        <TransformControls
-          mode="translate"
-          space="world"
-          position={point.position}
-          size={0.5}
-          onMouseDown={() => {
-            // Hide dropdown when starting to move
-            if (onContextMenu) onContextMenu({ type: 'startMove' });
-          }}
-          onMouseUp={(e) => {
-            const target = e?.target as any;
-            if (target?.object) {
-              const pos = target.object.position;
-              onUpdate(point.id, [pos.x, pos.y, pos.z]);
-            }
-          }}
-        >
-          <mesh position={point.position} visible={false} />
-        </TransformControls>
-      )}
-    </>
+    </TransformControls>
   );
 }
 
@@ -218,11 +223,14 @@ function ViewerScene({
   selectedCalibrationIndex,
   setSelectedCalibrationIndex,
   recreateProxyTrigger,
+  removeRedProxiesTrigger,
   debugProxy,
+  proxyDistributionThreshold,
   isAdjustingSplat,
   pinCategories,
   onUpdatePointCategories,
   showPinCategories,
+  showFullCategories,
   pinFilter,
   renderQuality,
   onDeletePoint,
@@ -536,9 +544,173 @@ function ViewerScene({
     debugProxyRef.current = debugProxy;
   }, [debugProxy]);
 
+  const updateProxyColors = useCallback(() => {
+    if (!pointsProxyRef.current || !pointsProxyRef.current.geometry) return;
+    
+    const positionsAttr = pointsProxyRef.current.geometry.attributes.position;
+    if (!positionsAttr) return;
+    
+    const positions = positionsAttr.array;
+    const numPoints = positionsAttr.count;
+    const colors = new Float32Array(numPoints * 4);
+    
+    const cellSize = proxyDistributionThreshold;
+    const grid = new Map<string, number>();
+    const proxyToSplatIndex = pointsProxyRef.current.userData.proxyToSplatIndex;
+    
+    const currentlyErased = new Set(Array.from(erasedIndices?.keys() || []).filter(i => (erasedIndices?.get(i) || 0) > 0));
+
+    for (let i = 0; i < numPoints; i++) {
+      if (proxyToSplatIndex && currentlyErased.has(proxyToSplatIndex[i])) continue;
+      const x = Math.floor(positions[i * 3] / cellSize);
+      const y = Math.floor(positions[i * 3 + 1] / cellSize);
+      const z = Math.floor(positions[i * 3 + 2] / cellSize);
+      const key = `${x},${y},${z}`;
+      grid.set(key, (grid.get(key) || 0) + 1);
+    }
+    
+    for (let i = 0; i < numPoints; i++) {
+      if (proxyToSplatIndex && currentlyErased.has(proxyToSplatIndex[i])) {
+        // Hide erased splats
+        colors[i * 4] = 0;
+        colors[i * 4 + 1] = 0;
+        colors[i * 4 + 2] = 0;
+        colors[i * 4 + 3] = 0;
+        continue;
+      }
+
+      const x = Math.floor(positions[i * 3] / cellSize);
+      const y = Math.floor(positions[i * 3 + 1] / cellSize);
+      const z = Math.floor(positions[i * 3 + 2] / cellSize);
+      const key = `${x},${y},${z}`;
+      const count = grid.get(key) || 0;
+      
+      if (count > 10) {
+        // Blue (very close)
+        colors[i * 4] = 0;
+        colors[i * 4 + 1] = 0;
+        colors[i * 4 + 2] = 1;
+        colors[i * 4 + 3] = 1;
+      } else if (count > 2) {
+        // Green (slightly separated)
+        colors[i * 4] = 0;
+        colors[i * 4 + 1] = 1;
+        colors[i * 4 + 2] = 0;
+        colors[i * 4 + 3] = 1;
+      } else {
+        // Red (outliers)
+        colors[i * 4] = 1;
+        colors[i * 4 + 1] = 0;
+        colors[i * 4 + 2] = 0;
+        colors[i * 4 + 3] = 1;
+      }
+    }
+    
+    pointsProxyRef.current.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+    
+    if (pointsProxyRef.current.material) {
+      const mat = pointsProxyRef.current.material as THREE.PointsMaterial;
+      mat.vertexColors = true;
+      mat.color.setHex(0xffffff);
+      mat.needsUpdate = true;
+    }
+  }, [proxyDistributionThreshold, erasedIndices]);
+
+  useEffect(() => {
+    updateProxyColors();
+  }, [updateProxyColors]);
+
+  const erasedIndicesRef = useRef(erasedIndices);
+  useEffect(() => {
+    erasedIndicesRef.current = erasedIndices;
+  }, [erasedIndices]);
+
+  useEffect(() => {
+    if (removeRedProxiesTrigger > 0 && pointsProxyRef.current && pointsProxyRef.current.geometry) {
+      const positionsAttr = pointsProxyRef.current.geometry.attributes.position;
+      if (!positionsAttr) return;
+
+      const positions = positionsAttr.array;
+      const numPoints = positionsAttr.count;
+      const cellSize = proxyDistributionThreshold;
+      const grid = new Map<string, number>();
+      const proxyToSplatIndex = pointsProxyRef.current.userData.proxyToSplatIndex;
+
+      if (!proxyToSplatIndex) return;
+
+      const currentErasedIndices = erasedIndicesRef.current;
+      const currentlyErased = new Set(Array.from(currentErasedIndices?.keys() || []).filter(i => (currentErasedIndices?.get(i) || 0) > 0));
+
+      for (let i = 0; i < numPoints; i++) {
+        if (currentlyErased.has(proxyToSplatIndex[i])) continue;
+        const x = Math.floor(positions[i * 3] / cellSize);
+        const y = Math.floor(positions[i * 3 + 1] / cellSize);
+        const z = Math.floor(positions[i * 3 + 2] / cellSize);
+        const key = `${x},${y},${z}`;
+        grid.set(key, (grid.get(key) || 0) + 1);
+      }
+
+      const indicesToErase: number[] = [];
+      for (let i = 0; i < numPoints; i++) {
+        if (currentlyErased.has(proxyToSplatIndex[i])) continue;
+
+        const x = Math.floor(positions[i * 3] / cellSize);
+        const y = Math.floor(positions[i * 3 + 1] / cellSize);
+        const z = Math.floor(positions[i * 3 + 2] / cellSize);
+        const key = `${x},${y},${z}`;
+        const count = grid.get(key) || 0;
+
+        if (count <= 2) {
+          indicesToErase.push(proxyToSplatIndex[i]);
+        }
+      }
+
+      if (indicesToErase.length > 0 && setEraserHistory && setErasedIndices && setOriginalColors) {
+        setEraserHistory(prev => [...prev, [...indicesToErase]]);
+        setErasedIndices(prev => {
+          const next = new Map(prev);
+          indicesToErase.forEach(idx => {
+            const count = next.get(idx) || 0;
+            next.set(idx, count + 1);
+          });
+          return next;
+        });
+        
+        // Also need to save original colors if not already saved
+        const splatMesh = groupRef.current?.children[0] as any;
+        if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+          const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+          if (covAndColorTexture) {
+            const colorData = covAndColorTexture.image.data;
+            
+            // Save to ref synchronously to avoid any timing issues
+            indicesToErase.forEach(idx => {
+              if (!originalColorsRef.current.has(idx)) {
+                const offset = idx * 4;
+                const colorUint = colorData[offset + 3];
+                originalColorsRef.current.set(idx, colorUint);
+              }
+            });
+
+            setOriginalColors(prev => {
+              const next = new Map(prev);
+              indicesToErase.forEach(idx => {
+                if (!next.has(idx)) {
+                  next.set(idx, originalColorsRef.current.get(idx)!);
+                }
+              });
+              return next;
+            });
+          }
+        }
+      }
+    }
+  }, [removeRedProxiesTrigger]);
+
   useEffect(() => {
     if (splatUrl) {
       console.log('Splat URL changed or Recreate triggered, initializing proxy search...');
+      originalColorsRef.current.clear();
       
       // Cleanup existing proxy if any
       if (pointsProxyRef.current) {
@@ -633,10 +805,12 @@ function ViewerScene({
                    
                    const positions = new Float32Array(splatCount * 3);
                    const splatIndices = splatIndexAttr ? splatIndexAttr.array : null;
+                   const proxyToSplatIndex = new Uint32Array(splatCount);
                    
                    for (let i = 0; i < splatCount; i++) {
                       // If splatIndex exists, use it to lookup the texture data. Otherwise linear.
                       const dataIndex = splatIndices ? splatIndices[i] : i;
+                      proxyToSplatIndex[i] = dataIndex;
                       
                       // Assuming RGBA texture (4 components per pixel)
                       const srcOffset = dataIndex * 4;
@@ -655,12 +829,15 @@ function ViewerScene({
                    const pointsMat = new THREE.PointsMaterial({ 
                       size: debugProxyRef.current ? 0.5 : 0.1, 
                       visible: true,
-                      color: debugProxyRef.current ? 0x00ff00 : 0xff0000 
+                      vertexColors: true,
+                      transparent: true,
+                      alphaTest: 0.5
                    });
                    
                    const pointsObj = new THREE.Points(pointsGeo, pointsMat);
                    pointsObj.name = 'splat-proxy';
                    pointsObj.visible = debugProxyRef.current;
+                   pointsObj.userData.proxyToSplatIndex = proxyToSplatIndex;
                    
                    // Add to the splat mesh parent so it transforms with it but isn't hidden when splat is hidden
                    if (mesh.parent) {
@@ -670,6 +847,8 @@ function ViewerScene({
                    }
                    pointsProxyRef.current = pointsObj;
                    splatRef.current = mesh;
+                   
+                   updateProxyColors();
                    
                    console.log(`Created Splat Proxy from Texture Data! (${splatCount} points)`);
                    clearInterval(interval);
@@ -700,15 +879,23 @@ function ViewerScene({
                     const pointsGeo = new THREE.BufferGeometry();
                     pointsGeo.setAttribute('position', positions);
                     
+                    const proxyToSplatIndex = new Uint32Array(positions.count);
+                    for (let i = 0; i < positions.count; i++) {
+                       proxyToSplatIndex[i] = i;
+                    }
+                    
                     const pointsMat = new THREE.PointsMaterial({ 
                        size: debugProxyRef.current ? 0.5 : 0.1, 
                        visible: true,
-                       color: debugProxyRef.current ? 0x00ff00 : 0xff0000 
+                       vertexColors: true,
+                       transparent: true,
+                       alphaTest: 0.5
                     });
                     
                     const pointsObj = new THREE.Points(pointsGeo, pointsMat);
                     pointsObj.name = 'splat-proxy';
                     pointsObj.visible = debugProxyRef.current;
+                    pointsObj.userData.proxyToSplatIndex = proxyToSplatIndex;
                     
                     if (mesh.parent) {
                       mesh.parent.add(pointsObj);
@@ -717,6 +904,8 @@ function ViewerScene({
                     }
                     pointsProxyRef.current = pointsObj;
                     splatRef.current = mesh;
+                    
+                    updateProxyColors();
                     
                     console.log(`Created Splat Proxy from Attributes! (${positions.count} points)`);
                     clearInterval(interval);
@@ -758,7 +947,6 @@ function ViewerScene({
       if (pointsProxyRef.current.material) {
         const mat = pointsProxyRef.current.material as THREE.PointsMaterial;
         mat.size = debugProxy ? 0.5 : 0.1;
-        mat.color.set(debugProxy ? 0x00ff00 : 0xff0000);
         mat.needsUpdate = true;
       }
     }
@@ -800,6 +988,7 @@ function ViewerScene({
             }}
             isAdjustingSplat={isAdjustingSplat}
             showCategories={showPinCategories}
+            showFullCategories={showFullCategories}
             onContextMenu={(e) => {
               if (isEraserMode) return;
               if (e.type === 'startMove') {
@@ -935,53 +1124,24 @@ function ViewerScene({
       {isCalibrationMode && calibrationPoints && (
         <>
            {calibrationPoints.map((pos, i) => (
-             <group key={`calib-${i}`}>
-               <mesh 
-                 position={pos}
-                 onClick={(e) => {
-                   e.stopPropagation();
-                   setSelectedCalibrationIndex(i);
-                 }}
-                 renderOrder={1000}
-               >
-                 <sphereGeometry args={[0.08, 16, 16]} />
-                 <meshStandardMaterial 
-                   color={selectedCalibrationIndex === i ? "#fbbf24" : "#fbbf24"} 
-                   emissive={selectedCalibrationIndex === i ? "#fbbf24" : "#d97706"}
-                   emissiveIntensity={selectedCalibrationIndex === i ? 1 : 0.5}
-                   depthTest={false}
-                   transparent
-                 />
-               </mesh>
-               {selectedCalibrationIndex === i && !isAdjustingSplat && (
-                 <TransformControls
-                   mode="translate"
-                   space="world"
-                   position={pos}
-                   size={0.5}
-                   onMouseUp={(e) => {
-                     const target = e?.target as any;
-                     if (target?.object) {
-                       const newPos = target.object.position;
-                       if (onUpdateCalibrationPoint) {
-                         onUpdateCalibrationPoint(i, [newPos.x, newPos.y, newPos.z]);
-                       }
-                     }
-                   }}
-                 >
-                    <mesh position={pos} visible={false} />
-                 </TransformControls>
-               )}
-             </group>
+             <CalibrationPoint
+               key={`calib-${i}`}
+               pos={pos}
+               i={i}
+               selectedCalibrationIndex={selectedCalibrationIndex}
+               setSelectedCalibrationIndex={setSelectedCalibrationIndex}
+               isAdjustingSplat={isAdjustingSplat}
+               onUpdateCalibrationPoint={onUpdateCalibrationPoint}
+             />
            ))}
            {calibrationPoints.length === 2 && (
              <Line
                points={calibrationPoints}
-               color="#fbbf24"
+               color={"#fbbf24"}
                lineWidth={3}
+               dashed={false}
                depthTest={false}
-               renderOrder={1}
-               toneMapped={false}
+               renderOrder={1000}
              />
            )}
         </>
@@ -1026,6 +1186,59 @@ function ViewerScene({
         <GizmoViewport axisColors={['#ff3653', '#8adb00', '#2c8fff']} labelColor="white" />
       </GizmoHelper>
     </>
+  );
+}
+
+function CalibrationPoint({ pos, i, selectedCalibrationIndex, setSelectedCalibrationIndex, isAdjustingSplat, onUpdateCalibrationPoint }: any) {
+  const isControlsVisible = selectedCalibrationIndex === i && !isAdjustingSplat;
+
+  return (
+    <group>
+      <TransformControls
+        mode="translate"
+        space="world"
+        size={0.5}
+        showX={isControlsVisible}
+        showY={isControlsVisible}
+        showZ={isControlsVisible}
+        enabled={isControlsVisible}
+        position={pos}
+        onMouseUp={(e: any) => {
+          if (e.target && e.target.object && onUpdateCalibrationPoint) {
+            const newPos = e.target.object.position;
+            onUpdateCalibrationPoint(i, [newPos.x, newPos.y, newPos.z]);
+          }
+        }}
+      >
+        <mesh 
+          onClick={(e) => {
+            e.stopPropagation();
+            setSelectedCalibrationIndex(i);
+          }}
+          renderOrder={1000}
+        >
+          <sphereGeometry args={[0.08, 16, 16]} />
+          <meshStandardMaterial 
+            color={selectedCalibrationIndex === i ? "#fbbf24" : "#fbbf24"} 
+            emissive={selectedCalibrationIndex === i ? "#fbbf24" : "#d97706"}
+            emissiveIntensity={selectedCalibrationIndex === i ? 1 : 0.5}
+            depthTest={false}
+            transparent
+          />
+          <Html position={[0, 0, 0]} center zIndexRange={[100, 0]}>
+            <div 
+              className="bg-neutral-900/80 backdrop-blur-sm text-yellow-400 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 whitespace-nowrap mt-4 cursor-pointer hover:bg-neutral-800 transition-colors pointer-events-auto"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelectedCalibrationIndex(i);
+              }}
+            >
+              {i === 0 ? "Start" : "End"}
+            </div>
+          </Html>
+        </mesh>
+      </TransformControls>
+    </group>
   );
 }
 

@@ -28,6 +28,18 @@ export type PinFilter = {
   matchAll: boolean;
 };
 
+export type WGS84Coordinate = {
+  lat: number;
+  lng: number;
+};
+
+export type WGS84Calibration = {
+  p1: [number, number, number];
+  p2: [number, number, number];
+  wgs1: WGS84Coordinate;
+  wgs2: WGS84Coordinate;
+};
+
 export default function App() {
   const [splatUrl, setSplatUrl] = useState<string>('https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat');
   const [splatSource, setSplatSource] = useState<SplatSource>({ type: 'url', value: 'https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat' });
@@ -46,6 +58,7 @@ export default function App() {
   ]);
   const [pinFilter, setPinFilter] = useState<PinFilter>({ categories: [], matchAll: false });
   const [showPinCategories, setShowPinCategories] = useState<boolean>(false);
+  const [showFullCategories, setShowFullCategories] = useState<boolean>(false);
   const [renderQuality, setRenderQuality] = useState<'quality' | 'efficacy'>('quality');
   const [selectedPinId, setSelectedPinId] = useState<string | null>(null);
   const [useWASD, setUseWASD] = useState<boolean>(false);
@@ -53,12 +66,15 @@ export default function App() {
   const [viewDistance, setViewDistance] = useState<number>(100);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [lockedFields, setLockedFields] = useState<Record<string, boolean>>({ gridSize: true });
+  const [wgs84Calibration, setWgs84Calibration] = useState<WGS84Calibration | null>(null);
 
   // Calibration State
   const [isCalibrationMode, setIsCalibrationMode] = useState(false);
   const [calibrationPoints, setCalibrationPoints] = useState<[number, number, number][]>([]);
   const [recreateProxyTrigger, setRecreateProxyTrigger] = useState(0);
+  const [removeRedProxiesTrigger, setRemoveRedProxiesTrigger] = useState(0);
   const [debugProxy, setDebugProxy] = useState(false);
+  const [proxyDistributionThreshold, setProxyDistributionThreshold] = useState(0.1);
 
   // Eraser State
   const [isEraserMode, setIsEraserMode] = useState(false);
@@ -199,7 +215,7 @@ export default function App() {
     setCalibrationPoints(newPoints);
   };
 
-  const handleApplyCalibration = (realDistance: number) => {
+  const handleApplyCalibration = (realDistance: number, wgs1?: WGS84Coordinate, wgs2?: WGS84Coordinate) => {
     if (calibrationPoints.length !== 2) return;
     
     // Calculate distance between points in 3D space
@@ -213,29 +229,36 @@ export default function App() {
         return;
     }
 
-    // Formula: gridSize = (virtualDistance / realDistance) * 0.1 * gridDivisions
-    // This ensures 1 cell (gridSize/gridDivisions) = 0.1 meters * (virtual / real)
-    // Wait, let's re-verify.
-    // Scale Factor S = virtual / real (units per meter)
-    // We want cell size to be 0.1 meters.
-    // In virtual units, cell size should be 0.1 * S.
-    // Cell Size = 0.1 * (virtualDistance / realDistance).
-    // Grid Size = Cell Size * gridDivisions.
-    // Grid Size = 0.1 * (virtualDistance / realDistance) * gridDivisions.
-    
     const newGridSize = (virtualDistance / realDistance) * 0.1 * gridDivisions;
     
     setGridSize(newGridSize);
     setLockedFields(prev => ({ ...prev, gridSize: true }));
     setIsCalibrationMode(false);
+    
+    if (wgs1 && wgs2) {
+      setWgs84Calibration({
+        p1: calibrationPoints[0],
+        p2: calibrationPoints[1],
+        wgs1,
+        wgs2
+      });
+      addNotification(`Grid and WGS84 calibrated! 1 cell = 10cm`, 'success');
+    } else {
+      addNotification(`Grid calibrated! 1 cell = 10cm`, 'success');
+    }
+    
     setCalibrationPoints([]);
-    addNotification(`Grid calibrated! 1 cell = 10cm`, 'success');
   };
 
 
   const handleRecreateProxy = () => {
     setRecreateProxyTrigger(prev => prev + 1);
     addNotification('Recreating proxy mesh...', 'info');
+  };
+
+  const handleRemoveRedProxies = () => {
+    setRemoveRedProxiesTrigger(prev => prev + 1);
+    addNotification('Removing red proxies...', 'info');
   };
 
   const handleAddPoint = () => {
@@ -364,6 +387,8 @@ export default function App() {
       if (settings.navigation?.moveSpeed !== undefined) setMoveSpeed(settings.navigation.moveSpeed);
       if (settings.pins) setPoints(settings.pins);
       if (settings.pinCategories) setPinCategories(settings.pinCategories);
+      if (settings.showPinCategories !== undefined) setShowPinCategories(settings.showPinCategories);
+      if (settings.showFullCategories !== undefined) setShowFullCategories(settings.showFullCategories);
       
       addNotification('Settings imported successfully', 'success');
     } catch (error) {
@@ -421,8 +446,11 @@ export default function App() {
         onCancelCalibration={handleCancelCalibration}
         onApplyCalibration={handleApplyCalibration}
         onRecreateProxy={handleRecreateProxy}
+        onRemoveRedProxies={handleRemoveRedProxies}
         debugProxy={debugProxy}
         setDebugProxy={setDebugProxy}
+        proxyDistributionThreshold={proxyDistributionThreshold}
+        setProxyDistributionThreshold={setProxyDistributionThreshold}
         onInteractionStart={() => setIsAdjustingSplat(true)}
         onInteractionEnd={() => setIsAdjustingSplat(false)}
         pinCategories={pinCategories}
@@ -432,6 +460,8 @@ export default function App() {
         onUpdatePointCategories={handleUpdatePointCategories}
         showPinCategories={showPinCategories}
         setShowPinCategories={setShowPinCategories}
+        showFullCategories={showFullCategories}
+        setShowFullCategories={setShowFullCategories}
         renderQuality={renderQuality}
         setRenderQuality={setRenderQuality}
         isEraserMode={isEraserMode}
@@ -444,6 +474,7 @@ export default function App() {
         setErasedIndices={setErasedIndices}
         originalColors={originalColors}
         setOriginalColors={setOriginalColors}
+        wgs84Calibration={wgs84Calibration}
       />
       <main className="flex-1 relative">
         <Viewer
@@ -470,11 +501,14 @@ export default function App() {
           onCalibrationPointClick={handleCalibrationPointClick}
           onUpdateCalibrationPoint={handleUpdateCalibrationPoint}
           recreateProxyTrigger={recreateProxyTrigger}
+          removeRedProxiesTrigger={removeRedProxiesTrigger}
           debugProxy={debugProxy}
+          proxyDistributionThreshold={proxyDistributionThreshold}
           isAdjustingSplat={isAdjustingSplat}
           pinCategories={pinCategories}
           onUpdatePointCategories={handleUpdatePointCategories}
           showPinCategories={showPinCategories}
+          showFullCategories={showFullCategories}
           pinFilter={pinFilter}
           renderQuality={renderQuality}
           onDeletePoint={handleDeletePoint}
@@ -493,6 +527,7 @@ export default function App() {
           points={points}
           pinFilter={pinFilter}
           pinCategories={pinCategories}
+          showFullCategories={showFullCategories}
           connectedPinIds={connectedPinIds}
           setConnectedPinIds={setConnectedPinIds}
           connectionLineColor={connectionLineColor}

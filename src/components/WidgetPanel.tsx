@@ -6,6 +6,7 @@ interface WidgetPanelProps {
   points: Point[];
   pinFilter: PinFilter;
   pinCategories: PinCategory[];
+  showFullCategories: boolean;
   connectedPinIds: string[];
   setConnectedPinIds: React.Dispatch<React.SetStateAction<string[]>>;
   connectionLineColor: string;
@@ -16,6 +17,7 @@ export default function WidgetPanel({
   points,
   pinFilter,
   pinCategories,
+  showFullCategories,
   connectedPinIds,
   setConnectedPinIds,
   connectionLineColor,
@@ -237,7 +239,7 @@ export default function WidgetPanel({
                       <div className="flex flex-wrap gap-1">
                         {point.categories.map(cat => (
                           <span key={cat} className="text-[9px] bg-neutral-900 text-neutral-400 px-1 rounded border border-neutral-700 truncate max-w-full">
-                            {cat}
+                            {showFullCategories ? cat : (cat.split('-').length > 1 ? cat.split('-').slice(1).join('-') : cat)}
                           </span>
                         ))}
                       </div>
@@ -280,7 +282,7 @@ export default function WidgetPanel({
                         <div className="flex flex-wrap gap-1 pl-5">
                           {point.categories.map(cat => (
                             <span key={cat} className="text-[9px] bg-indigo-950/50 text-indigo-300/70 px-1 rounded border border-indigo-800/50 truncate max-w-full">
-                              {cat}
+                              {showFullCategories ? cat : (cat.split('-').length > 1 ? cat.split('-').slice(1).join('-') : cat)}
                             </span>
                           ))}
                         </div>
