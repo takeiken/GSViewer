@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MousePointer2, Square, PenTool, Hexagon, Eraser, Move, Scissors, MousePointerClick, ChevronDown, ChevronUp } from 'lucide-react';
+import { MousePointer2, Square, Paintbrush, Hexagon, Eraser, Move, Scissors, ChevronDown, ChevronUp, LassoSelect } from 'lucide-react';
 
 interface SelectionWidgetProps {
   selectionMode: 'rect' | 'lasso' | 'polygon' | 'brush' | null;
@@ -59,7 +59,7 @@ export default function SelectionWidget({
               className={`p-2 rounded flex items-center justify-center transition-colors ${selectionMode === 'lasso' ? 'bg-indigo-600/50 text-white' : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200'}`}
               title="Lasso Select"
             >
-              <PenTool size={16} />
+              <LassoSelect size={16} />
             </button>
             <button
               onClick={() => setSelectionMode('polygon')}
@@ -73,7 +73,7 @@ export default function SelectionWidget({
               className={`p-2 rounded flex items-center justify-center transition-colors ${selectionMode === 'brush' ? 'bg-indigo-600/50 text-white' : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200'}`}
               title="Brush Select"
             >
-              <MousePointerClick size={16} />
+              <Paintbrush size={16} />
             </button>
           </div>
 
