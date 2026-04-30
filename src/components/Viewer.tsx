@@ -1,11 +1,212 @@
-import { useRef, Suspense, useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { useRef, Suspense, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Html, Grid, Splat, TransformControls, KeyboardControls, useKeyboardControls, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { Trash2 } from 'lucide-react';
-import type { Point, PinCategory } from '../App';
+import { exportToPly } from '../utils/plyExporter';
+import type { Point, PinCategory, EraserStroke, LayerData } from '../App';
+
+const identifyNoiseSplats = (
+  positions: any, 
+  numPoints: number, 
+  proxyToSplatIndex: Uint32Array | undefined,
+  centerData: Float32Array | null,
+  colorData: Uint32Array | null,
+  proxyDistributionThreshold: number,
+  sorThreshold: number,
+  sorNeighbors: number,
+  volumetricThresholdPercent: number
+) => {
+  const noiseFlags = new Uint8Array(numPoints);
+  
+  if (centerData && colorData) {
+    const colorDataInt16 = new Int16Array(colorData.buffer);
+    const proxyScores = new Float32Array(numPoints);
+    
+    for (let i = 0; i < numPoints; i++) {
+      const splatIdx = proxyToSplatIndex ? proxyToSplatIndex[i] : i;
+      const colorUint = colorData[splatIdx * 4 + 3];
+      const opacity = (colorUint >>> 24) & 0xFF;
+      
+      const scaleMult = centerData[splatIdx * 4 + 3];
+      const m11 = colorDataInt16[splatIdx * 8 + 0] * scaleMult;
+      const m12 = colorDataInt16[splatIdx * 8 + 1] * scaleMult;
+      const m13 = colorDataInt16[splatIdx * 8 + 2] * scaleMult;
+      const m22 = colorDataInt16[splatIdx * 8 + 3] * scaleMult;
+      const m23 = colorDataInt16[splatIdx * 8 + 4] * scaleMult;
+      const m33 = colorDataInt16[splatIdx * 8 + 5] * scaleMult;
+
+      const det = m11 * (m22 * m33 - m23 * m23) 
+                - m12 * (m12 * m33 - m13 * m23) 
+                + m13 * (m12 * m23 - m13 * m22);
+                
+      const volume = Math.sqrt(Math.max(0, det));
+      proxyScores[i] = opacity / (volume + 1e-10);
+    }
+
+    const bottomPercent = Math.min(1.0, volumetricThresholdPercent / 100.0); 
+    const sortedScores = new Float32Array(proxyScores).sort();
+    const thresholdIndex = Math.floor(numPoints * bottomPercent);
+    const volumetricThreshold = sortedScores[Math.min(numPoints - 1, Math.max(0, thresholdIndex))];
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < numPoints; i++) {
+      const px = positions[i * 3];
+      const py = positions[i * 3 + 1];
+      const pz = positions[i * 3 + 2];
+      if (px < minX) minX = px;
+      if (py < minY) minY = py;
+      if (pz < minZ) minZ = pz;
+      if (px > maxX) maxX = px;
+      if (py > maxY) maxY = py;
+      if (pz > maxZ) maxZ = pz;
+    }
+    const extentX = maxX - minX;
+    const extentY = maxY - minY;
+    const extentZ = maxZ - minZ;
+    const maxExtent = Math.max(extentX, extentY, extentZ, 0.1);
+    // Use a grid with roughly 200 cells along the longest axis
+    const sorCellSize = Math.max(0.01, maxExtent / 200);
+
+    const sorGrid = new Map<number, number[]>();
+    const hash = (x: number, y: number, z: number) => {
+      return (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) | 0;
+    };
+
+    for (let i = 0; i < numPoints; i++) {
+      const px = positions[i * 3];
+      const py = positions[i * 3 + 1];
+      const pz = positions[i * 3 + 2];
+      const cx = Math.floor(px / sorCellSize);
+      const cy = Math.floor(py / sorCellSize);
+      const cz = Math.floor(pz / sorCellSize);
+      const h = hash(cx, cy, cz);
+      let cell = sorGrid.get(h);
+      if (!cell) {
+        cell = [];
+        sorGrid.set(h, cell);
+      }
+      cell.push(i);
+    }
+
+    const proxyAvgDistances = new Float32Array(numPoints);
+    let sumAvgDist = 0;
+    const kNeighbors = sorNeighbors;
+    const kDists = new Float32Array(kNeighbors);
+
+    const neighborOffsets = [
+      [0, 0, 0],
+      [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+      [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
+      [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
+      [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1],
+      [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+      [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1]
+    ];
+
+    for (let i = 0; i < numPoints; i++) {
+      const px = positions[i * 3];
+      const py = positions[i * 3 + 1];
+      const pz = positions[i * 3 + 2];
+      const cx = Math.floor(px / sorCellSize);
+      const cy = Math.floor(py / sorCellSize);
+      const cz = Math.floor(pz / sorCellSize);
+      
+      for (let j = 0; j < kNeighbors; j++) kDists[j] = Infinity;
+      let maxDistSq = Infinity;
+      let foundCount = 0;
+      
+      let checkedCount = 0;
+      const MAX_CHECK = 50;
+      
+      for (let o = 0; o < 27 && checkedCount < MAX_CHECK; o++) {
+        const offset = neighborOffsets[o];
+        const h = hash(cx + offset[0], cy + offset[1], cz + offset[2]);
+        const cell = sorGrid.get(h);
+        if (cell) {
+          // Limit points checked per cell to avoid O(N^2) in dense clusters
+          const checkCount = Math.min(cell.length, 10);
+          const step = Math.max(1, Math.floor(cell.length / checkCount));
+          
+          for (let j = 0; j < cell.length && checkedCount < MAX_CHECK; j += step) {
+            const ni = cell[j];
+            if (ni !== i) {
+              checkedCount++;
+              const nx = positions[ni * 3];
+              const ny = positions[ni * 3 + 1];
+              const nz = positions[ni * 3 + 2];
+              const distSq = (px - nx)**2 + (py - ny)**2 + (pz - nz)**2;
+              
+              if (distSq < maxDistSq || foundCount < kNeighbors) {
+                let insertPos = foundCount < kNeighbors ? foundCount : kNeighbors - 1;
+                while (insertPos > 0 && kDists[insertPos - 1] > distSq) {
+                  kDists[insertPos] = kDists[insertPos - 1];
+                  insertPos--;
+                }
+                kDists[insertPos] = distSq;
+                if (foundCount < kNeighbors) foundCount++;
+                if (foundCount === kNeighbors) maxDistSq = kDists[kNeighbors - 1];
+              }
+            }
+          }
+        }
+      }
+      
+      let distSum = 0;
+      for (let j = 0; j < foundCount; j++) {
+        distSum += Math.sqrt(kDists[j]);
+      }
+      const avgDist = foundCount > 0 ? distSum / foundCount : 1000;
+      proxyAvgDistances[i] = avgDist;
+      sumAvgDist += avgDist;
+    }
+
+    const globalMeanDistance = sumAvgDist / numPoints;
+    let sumSqDiff = 0;
+    for (let i = 0; i < numPoints; i++) {
+      sumSqDiff += (proxyAvgDistances[i] - globalMeanDistance)**2;
+    }
+    const globalStdDevDistance = Math.sqrt(sumSqDiff / numPoints);
+    const currentSorThreshold = sorThreshold;
+
+    for (let i = 0; i < numPoints; i++) {
+      const isVolumetricNoise = proxyScores[i] <= volumetricThreshold;
+      const isSorNoise = proxyAvgDistances[i] > globalMeanDistance + currentSorThreshold * globalStdDevDistance;
+      if (isVolumetricNoise || isSorNoise) {
+        noiseFlags[i] = 1;
+      }
+    }
+  } else {
+    // Fallback
+    const cellSize = proxyDistributionThreshold;
+    const grid = new Map<string, number>();
+    for (let i = 0; i < numPoints; i++) {
+      const x = Math.floor(positions[i * 3] / cellSize);
+      const y = Math.floor(positions[i * 3 + 1] / cellSize);
+      const z = Math.floor(positions[i * 3 + 2] / cellSize);
+      const key = `${x},${y},${z}`;
+      grid.set(key, (grid.get(key) || 0) + 1);
+    }
+    for (let i = 0; i < numPoints; i++) {
+      const x = Math.floor(positions[i * 3] / cellSize);
+      const y = Math.floor(positions[i * 3 + 1] / cellSize);
+      const z = Math.floor(positions[i * 3 + 2] / cellSize);
+      const key = `${x},${y},${z}`;
+      const count = grid.get(key) || 0;
+      if (count <= 2) {
+        noiseFlags[i] = 1;
+      }
+    }
+  }
+  
+  return noiseFlags;
+};
 
 type ViewerProps = {
+  layers: LayerData[];
+  activeLayerId: string;
   splatUrl: string;
   scale: number;
   pointSize: number;
@@ -23,6 +224,7 @@ type ViewerProps = {
   useWASD: boolean;
   moveSpeed: number;
   viewDistance: number;
+  splatViewDistance: number;
   isCalibrationMode?: boolean;
   calibrationPoints?: [number, number, number][];
   onCalibrationPointClick?: (point: [number, number, number]) => void;
@@ -31,6 +233,9 @@ type ViewerProps = {
   removeRedProxiesTrigger: number;
   debugProxy: boolean;
   proxyDistributionThreshold: number;
+  sorThreshold: number;
+  sorNeighbors: number;
+  volumetricThresholdPercent: number;
   onUpdatePoints?: (updatedPoints: Point[]) => void;
   isAdjustingSplat?: boolean;
   pinCategories?: PinCategory[];
@@ -40,17 +245,26 @@ type ViewerProps = {
   pinFilter?: { categories: string[], matchAll: boolean };
   renderQuality?: 'quality' | 'efficacy';
   onDeletePoint?: (id: string) => void;
-  isEraserMode?: boolean;
+  selectionMode: 'rect' | 'lasso' | 'polygon' | 'brush' | null;
+  selectionPenetrate: boolean;
+  selectedIndices: Set<number>;
+  setSelectedIndices: React.Dispatch<React.SetStateAction<Set<number>>>;
+  invertSelectionTrigger: number;
   brushSize?: number;
-  eraserHistory?: number[][];
-  setEraserHistory?: React.Dispatch<React.SetStateAction<number[][]>>;
+  eraserHistory?: EraserStroke[];
+  setEraserHistory?: React.Dispatch<React.SetStateAction<EraserStroke[]>>;
   erasedIndices?: Map<number, number>;
   setErasedIndices?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   originalColors?: Map<number, number>;
   setOriginalColors?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   connectedPinIds?: string[];
   connectionLineColor?: string;
+  onExemplarExported?: (blob: Blob) => void;
 };
+
+export interface ViewerHandle {
+  exportExemplar: () => Promise<void>;
+}
 
 function Pin({ 
   point, 
@@ -62,7 +276,7 @@ function Pin({
   showCategories,
   showFullCategories,
   onContextMenu,
-  isEraserMode
+  selectionMode
 }: { 
   point: Point; 
   onUpdate: (id: string, pos: [number, number, number]) => void; 
@@ -73,7 +287,7 @@ function Pin({
   showCategories?: boolean;
   showFullCategories?: boolean;
   onContextMenu?: (e: any) => void;
-  isEraserMode?: boolean;
+  selectionMode?: 'rect' | 'lasso' | 'polygon' | 'brush' | null;
 }) {
   const formattedCategories = point.categories?.map(cat => {
     if (showFullCategories) return cat;
@@ -85,7 +299,7 @@ function Pin({
     ? `${point.name} (${formattedCategories.join(', ')})`
     : point.name;
 
-  const isControlsVisible = isSelected && !isAdjustingSplat && !isEraserMode;
+  const isControlsVisible = isSelected && !isAdjustingSplat && !selectionMode;
 
   return (
     <TransformControls
@@ -109,12 +323,12 @@ function Pin({
     >
       <mesh 
         onClick={(e) => {
-          if (isEraserMode) return;
+          if (selectionMode) return;
           e.stopPropagation();
           onSelect();
         }}
         onContextMenu={(e) => {
-          if (isEraserMode) return;
+          if (selectionMode) return;
           if (onContextMenu) {
             e.stopPropagation();
             onContextMenu(e);
@@ -131,12 +345,12 @@ function Pin({
           <div 
             className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap font-mono backdrop-blur-sm transition-colors cursor-pointer select-none ${isSelected ? 'bg-red-900/80 text-white border-red-700' : 'bg-neutral-900/80 text-neutral-300 border-neutral-700 hover:bg-neutral-800/80'}`}
             onClick={(e) => {
-              if (isEraserMode) return;
+              if (selectionMode) return;
               e.stopPropagation();
               onSelect();
             }}
             onContextMenu={(e) => {
-              if (isEraserMode) return;
+              if (selectionMode) return;
               if (onContextMenu) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -196,7 +410,15 @@ function WASDHandler({ controlsRef, moveSpeed }: { controlsRef: React.RefObject<
   return null;
 }
 
-function ViewerScene({ 
+const ViewerScene = forwardRef<ViewerHandle, ViewerProps & { 
+  isShiftPressed: boolean, 
+  isCtrlPressed: boolean,
+  controlsRef: React.RefObject<any>,
+  selectedCalibrationIndex: number | null,
+  setSelectedCalibrationIndex: (index: number | null) => void
+}>(({ 
+  layers,
+  activeLayerId,
   splatUrl, 
   scale, 
   rotation, 
@@ -214,6 +436,7 @@ function ViewerScene({
   useWASD,
   moveSpeed,
   viewDistance,
+  splatViewDistance,
   isShiftPressed,
   controlsRef,
   isCalibrationMode,
@@ -226,6 +449,9 @@ function ViewerScene({
   removeRedProxiesTrigger,
   debugProxy,
   proxyDistributionThreshold,
+  sorThreshold,
+  sorNeighbors,
+  volumetricThresholdPercent,
   isAdjustingSplat,
   pinCategories,
   onUpdatePointCategories,
@@ -234,7 +460,11 @@ function ViewerScene({
   pinFilter,
   renderQuality,
   onDeletePoint,
-  isEraserMode,
+  selectionMode,
+  selectionPenetrate,
+  selectedIndices,
+  setSelectedIndices,
+  invertSelectionTrigger,
   brushSize,
   eraserHistory,
   setEraserHistory,
@@ -244,15 +474,49 @@ function ViewerScene({
   setOriginalColors,
   connectedPinIds,
   connectionLineColor,
-  isCtrlPressed
-}: ViewerProps & { 
-  isShiftPressed: boolean, 
-  isCtrlPressed: boolean,
-  controlsRef: React.RefObject<any>,
-  selectedCalibrationIndex: number | null,
-  setSelectedCalibrationIndex: (index: number | null) => void
-}) {
+  isCtrlPressed,
+  onExemplarExported
+}, ref) => {
   const groupRef = useRef<THREE.Group>(null);
+
+  useImperativeHandle(ref, () => ({
+    exportExemplar: async () => {
+      const splatMesh = groupRef.current?.children[0] as any;
+      if (!splatMesh || !splatMesh.material || !splatMesh.material.uniforms) {
+        console.error("No active splat found for export");
+        return;
+      }
+      
+      const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (!centerAndScaleTexture || !covAndColorTexture) return;
+
+      const centerData = centerAndScaleTexture.image.data;
+      const colorData = covAndColorTexture.image.data;
+
+      const blob = await exportToPly(centerData, colorData, selectedIndices, erasedIndices);
+      if (onExemplarExported) {
+        onExemplarExported(blob);
+      }
+    },
+    exportCleanedPly: async () => {
+      const splatMesh = groupRef.current?.children[0] as any;
+      if (!splatMesh || !splatMesh.material || !splatMesh.material.uniforms) {
+        console.error("No active splat found for export");
+        return null;
+      }
+      
+      const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (!centerAndScaleTexture || !covAndColorTexture) return null;
+
+      const centerData = centerAndScaleTexture.image.data;
+      const colorData = covAndColorTexture.image.data;
+
+      return await exportToPly(centerData, colorData, undefined, erasedIndices);
+    }
+  }));
+
   const splatRef = useRef<any>(null);
   const pointsProxyRef = useRef<THREE.Points | null>(null);
   const foundCandidateTimeRef = useRef<number | null>(null);
@@ -261,6 +525,17 @@ function ViewerScene({
   const lastHoverCheck = useRef(0);
   const [isMoving, setIsMoving] = useState(false);
   const moveTimeoutRef = useRef<number | null>(null);
+
+  // Selection Logic
+  const [selectionPath2D, setSelectionPath2D] = useState<{ x: number, y: number }[]>([]);
+  const isSelectingRef = useRef(false);
+  const tempSelectionRef = useRef<Set<number>>(new Set());
+  const { size } = useThree();
+  
+  const lastPointerRef = useRef(new THREE.Vector2(-999, -999));
+  const lastCameraPosRef = useRef(new THREE.Vector3());
+  const lastCameraRotRef = useRef(new THREE.Euler());
+  const lastHitPointRef = useRef<THREE.Vector3 | null>(null);
   const isErasingRef = useRef(false);
   const currentStrokeRef = useRef<number[]>([]);
   
@@ -317,19 +592,63 @@ function ViewerScene({
   const previouslyErasedIndicesRef = useRef(new Set<number>());
 
   useFrame(({ pointer }) => {
+    // Sync splatViewDistance with the shader
+    if (splatRef.current && splatRef.current.material) {
+      const mat = splatRef.current.material;
+      if (!mat.userData.shaderPatched) {
+        mat.userData.shaderPatched = true;
+        mat.onBeforeCompile = (shader: any) => {
+          shader.uniforms.uSplatViewDistance = { value: splatViewDistance };
+          mat.userData.shader = shader;
+          
+          shader.vertexShader = shader.vertexShader.replace(
+            /void\s+main\s*\(\)\s*\{/,
+            'uniform float uSplatViewDistance;\nvoid main() {'
+          );
+          
+          shader.vertexShader = shader.vertexShader.replace(
+            'vec4 pos2d = projectionMatrix * camspace;',
+            `vec4 pos2d = projectionMatrix * camspace;
+            if (uSplatViewDistance > 0.0 && -camspace.z > uSplatViewDistance) {
+              gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+              return;
+            }`
+          );
+        };
+        mat.needsUpdate = true;
+      } else if (mat.userData.shader) {
+        mat.userData.shader.uniforms.uSplatViewDistance.value = splatViewDistance;
+      }
+    }
+
     // Throttle hover check
     const now = Date.now();
     if (now - lastHoverCheck.current < 50) return;
     lastHoverCheck.current = now;
 
-    if (!isShiftPressed && !isEraserMode) {
+    if (!isShiftPressed && !selectionMode) {
       if (ghostPosition) setGhostPosition(null);
       if (brushPosition) setBrushPosition(null);
       return;
     }
 
-    raycaster.setFromCamera(pointer, camera);
-    const hitPoint = raycastSplat(raycaster);
+    let hitPoint = lastHitPointRef.current;
+    
+    // Only raycast if pointer or camera moved
+    if (
+      lastPointerRef.current.x !== pointer.x ||
+      lastPointerRef.current.y !== pointer.y ||
+      !lastCameraPosRef.current.equals(camera.position) ||
+      !lastCameraRotRef.current.equals(camera.rotation)
+    ) {
+      lastPointerRef.current.copy(pointer);
+      lastCameraPosRef.current.copy(camera.position);
+      lastCameraRotRef.current.copy(camera.rotation);
+      
+      raycaster.setFromCamera(pointer, camera);
+      hitPoint = raycastSplat(raycaster);
+      lastHitPointRef.current = hitPoint;
+    }
 
     if (hitPoint) {
       if (isShiftPressed) {
@@ -341,7 +660,7 @@ function ViewerScene({
         setGhostPosition(null);
       }
       
-      if (isEraserMode && !isCtrlPressed) {
+      if (selectionMode && !isCtrlPressed) {
         setBrushPosition([hitPoint.x, hitPoint.y, hitPoint.z]);
         
         // Erasing logic
@@ -381,13 +700,15 @@ function ViewerScene({
                 const distSq = dx*dx + dy*dy + dz*dz;
                 
                 if (distSq <= brushLocalRadiusSq) {
-                  // Erase! Clear alpha (top 8 bits)
-                  if (!originalColorsRef.current.has(i)) {
-                    originalColorsRef.current.set(i, colorUint);
+                  if (!selectedIndices.has(i) && !tempSelectionRef.current.has(i)) {
+                    if (!originalColorsRef.current.has(i)) {
+                      originalColorsRef.current.set(i, colorUint);
+                    }
+                    // Yellow: R=255, G=255, B=0, A=255. Little endian ABGR -> (255<<24) | (0<<16) | (255<<8) | 255
+                    colorData[i * 4 + 3] = (255 << 24) | (0 << 16) | (255 << 8) | 255;
+                    tempSelectionRef.current.add(i);
+                    modified = true;
                   }
-                  colorData[i * 4 + 3] = colorUint & 0x00FFFFFF;
-                  currentStrokeRef.current.push(i);
-                  modified = true;
                 }
               }
               
@@ -409,7 +730,7 @@ function ViewerScene({
   // Handle click for pin placement
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
-      if (isEraserMode) return; // Disable pin placement in eraser mode
+      if (selectionMode) return; // Disable pin placement in eraser mode
       
       if (e.button === 0 && e.shiftKey) {
         e.stopPropagation();
@@ -447,56 +768,205 @@ function ViewerScene({
     const canvas = gl.domElement;
     canvas.addEventListener('pointerdown', handlePointerDown);
     return () => canvas.removeEventListener('pointerdown', handlePointerDown);
-  }, [camera, gl, onAddPinAtPosition, isShiftPressed, isEraserMode]);
+  }, [camera, gl, onAddPinAtPosition, isShiftPressed, selectionMode]);
 
-  // Handle eraser pointer events
+    // Handle Selection Pointer Events
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
-      if (isEraserMode && !isCtrlPressed && e.button === 0) {
-        isErasingRef.current = true;
-        currentStrokeRef.current = [];
-      }
-    };
-
-    const handlePointerUp = (e: PointerEvent) => {
-      if (isErasingRef.current) {
-        isErasingRef.current = false;
-        if (currentStrokeRef.current.length > 0) {
-          if (setEraserHistory && setErasedIndices && setOriginalColors) {
-            setEraserHistory(prev => [...prev, [...currentStrokeRef.current]]);
-            setErasedIndices(prev => {
-              const next = new Map(prev);
-              currentStrokeRef.current.forEach(idx => {
-                const count = next.get(idx) || 0;
-                next.set(idx, count + 1);
-              });
-              return next;
-            });
-            setOriginalColors(prev => {
-              const next = new Map(prev);
-              originalColorsRef.current.forEach((color, idx) => {
-                if (!next.has(idx)) {
-                  next.set(idx, color);
-                }
-              });
-              return next;
-            });
+      if (selectionMode && !isCtrlPressed && e.button === 0) {
+        if (selectionMode === 'brush') {
+          isErasingRef.current = true;
+          tempSelectionRef.current.clear();
+        } else {
+          isSelectingRef.current = true;
+          const rect = gl.domElement.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          
+          if (selectionMode === 'polygon') {
+          setSelectionPath2D(prev => {
+            if (prev.length > 2) {
+              const dist = Math.hypot(x - prev[0].x, y - prev[0].y);
+              if (dist < 20) { // snap and close
+                  isSelectingRef.current = false;
+                  process2DSelection(prev);
+                  return [];
+              }
+            }
+            return [...prev, { x, y }];
+          });
+        } else {
+            setSelectionPath2D([{ x, y }]);
           }
         }
       }
     };
 
+    const handlePointerMove = (e: PointerEvent) => {
+      if (isSelectingRef.current && (selectionMode === 'rect' || selectionMode === 'lasso')) {
+        const rect = gl.domElement.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        if (selectionMode === 'rect') {
+          setSelectionPath2D(prev => prev.length > 0 ? [prev[0], { x, y }] : [{ x, y }]);
+        } else if (selectionMode === 'lasso') {
+          setSelectionPath2D(prev => [...prev, { x, y }]);
+        }
+      }
+    };
+
+    const process2DSelection = (path: {x: number, y: number}[]) => {
+      if (path.length < 2 && selectionMode !== 'rect') return;
+      
+      const splatMesh = groupRef.current?.children[0] as any;
+      if (!splatMesh || !splatMesh.material || !splatMesh.material.uniforms) return;
+      
+      const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (!centerAndScaleTexture || !covAndColorTexture) return;
+
+      const centerData = centerAndScaleTexture.image.data;
+      const colorData = covAndColorTexture.image.data;
+      const numSplats = centerData.length / 4;
+      
+      const rect = gl.domElement.getBoundingClientRect();
+      const hw = rect.width / 2;
+      const hh = rect.height / 2;
+      
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      if (selectionMode === 'rect') {
+        minX = Math.min(path[0].x, path[path.length - 1].x);
+        maxX = Math.max(path[0].x, path[path.length - 1].x);
+        minY = Math.min(path[0].y, path[path.length - 1].y);
+        maxY = Math.max(path[0].y, path[path.length - 1].y);
+      } else {
+        for (const p of path) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+      }
+
+      const isPointInPolygon = (x: number, y: number) => {
+        if (selectionMode === 'rect') {
+          return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        }
+        let inside = false;
+        for (let i = 0, j = path.length - 1; i < path.length; j = i++) {
+          const xi = path[i].x, yi = path[i].y;
+          const xj = path[j].x, yj = path[j].y;
+          const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      };
+
+      const newSelection = new Set<number>();
+      let modified = false;
+
+      // Ensure matrices are up to date!
+      camera.updateMatrixWorld();
+      splatMesh.updateMatrixWorld();
+      const viewProj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(splatMesh.matrixWorld);
+      const viewMatrix = new THREE.Matrix4().multiplyMatrices(camera.matrixWorldInverse, splatMesh.matrixWorld);
+
+      let frontZ = Infinity;
+      const projected = [];
+
+      for (let i = 0; i < numSplats; i++) {
+        const colorUint = colorData[i * 4 + 3];
+        if ((colorUint >> 24) === 0) continue; // Erased
+        
+        const centerVec = new THREE.Vector3(centerData[i*4], centerData[i*4+1], centerData[i*4+2]);
+        
+        const vecNDC = centerVec.clone().applyMatrix4(viewProj);
+        if (vecNDC.z < -1 || vecNDC.z > 1) continue; 
+        
+        const px = (vecNDC.x * hw) + hw;
+        const py = -(vecNDC.y * hh) + hh;
+        
+        if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
+          if (isPointInPolygon(px, py)) {
+            const viewSpace = centerVec.clone().applyMatrix4(viewMatrix);
+            const linearDepth = -viewSpace.z; // In three.js camera looks down -Z
+            
+            projected.push({ i, depth: linearDepth });
+            if (linearDepth < frontZ) frontZ = linearDepth;
+          }
+        }
+      }
+
+      // 0.2 world units as threshold for separation
+      const zThreshold = 0.2; 
+      for (const p of projected) {
+        if (!selectionPenetrate && p.depth > frontZ + zThreshold) continue;
+        
+        newSelection.add(p.i);
+        const colorUint = colorData[p.i * 4 + 3];
+        if (!selectedIndices.has(p.i)) {
+          if (!originalColorsRef.current.has(p.i)) {
+            originalColorsRef.current.set(p.i, colorUint);
+          }
+          colorData[p.i * 4 + 3] = (255 << 24) | (0 << 16) | (255 << 8) | 255;
+          modified = true;
+        }
+      }
+
+      if (modified) {
+        covAndColorTexture.needsUpdate = true;
+      }
+      if (newSelection.size > 0) {
+        setSelectedIndices(prev => new Set([...prev, ...newSelection]));
+      }
+    };
+
+    const handlePointerUp = (e: PointerEvent) => {
+      if (selectionMode === 'brush' && isErasingRef.current) {
+        isErasingRef.current = false;
+        if (tempSelectionRef.current.size > 0) {
+           setSelectedIndices(prev => new Set([...prev, ...tempSelectionRef.current]));
+           tempSelectionRef.current.clear();
+        }
+      } else if (isSelectingRef.current) {
+        if (selectionMode !== 'polygon') {
+          isSelectingRef.current = false;
+          // Capture current value using the functional update
+          setSelectionPath2D(prev => {
+            process2DSelection(prev);
+            return []; // Clear after processing
+          });
+        }
+      }
+    };
+
+    const handleDoubleClick = (e: MouseEvent) => {
+      if (selectionMode === 'polygon' && isSelectingRef.current) {
+        isSelectingRef.current = false;
+        setSelectionPath2D(prev => {
+          process2DSelection(prev);
+          return [];
+        });
+      }
+    }
+
     const canvas = gl.domElement;
     canvas.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('dblclick', handleDoubleClick);
     
     return () => {
       canvas.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('dblclick', handleDoubleClick);
     };
-  }, [isEraserMode, isCtrlPressed, gl, setEraserHistory, setErasedIndices]);
+  }, [selectionMode, selectionPenetrate, isCtrlPressed, gl, camera, selectedIndices, setSelectedIndices]);
 
-  // Sync texture with erasedIndices (for Undo)
+  // Sync texture with erasedIndices (for Undo) and selection
+  const previouslySelectedIndicesRef = useRef<Set<number>>(new Set());
+
   useEffect(() => {
     const splatMesh = groupRef.current?.children[0] as any;
     if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
@@ -506,43 +976,102 @@ function ViewerScene({
         let modified = false;
 
         const currentlyErased = new Set(Array.from(erasedIndices?.keys() || []).filter(i => (erasedIndices?.get(i) || 0) > 0));
+        const currentlySelected = selectedIndices || new Set();
 
-        // Find splats to restore: in previouslyErased but not in currentlyErased
-        previouslyErasedIndicesRef.current.forEach(i => {
-          if (!currentlyErased.has(i)) {
-            const offset = i * 4;
-            const colorUint = colorData[offset + 3];
-            // Restore
-            const originalColor = originalColorsRef.current.get(i) ?? originalColors?.get(i) ?? (colorUint | 0xFF000000);
-            colorData[offset + 3] = originalColor;
-            modified = true;
-          }
-        });
+        const allToProcess = new Set([
+          ...previouslyErasedIndicesRef.current,
+          ...currentlyErased,
+          ...previouslySelectedIndicesRef.current,
+          ...currentlySelected
+        ]);
 
-        // Find splats to erase: in currentlyErased but not in previouslyErased
-        currentlyErased.forEach(i => {
-          if (!previouslyErasedIndicesRef.current.has(i)) {
-            const offset = i * 4;
-            const colorUint = colorData[offset + 3];
-            // Erase
-            colorData[offset + 3] = colorUint & 0x00FFFFFF;
-            modified = true;
-          }
+        allToProcess.forEach(i => {
+           const isErasedNow = currentlyErased.has(i);
+           const isSelectedNow = currentlySelected.has(i);
+           
+           const wasErased = previouslyErasedIndicesRef.current.has(i);
+           const wasSelected = previouslySelectedIndicesRef.current.has(i);
+           
+           if (isErasedNow !== wasErased || isSelectedNow !== wasSelected) {
+             const offset = i * 4;
+             const colorUint = colorData[offset + 3];
+             
+             if (!originalColorsRef.current.has(i)) {
+                const original = originalColors?.get(i) ?? colorUint;
+                originalColorsRef.current.set(i, original);
+             }
+             
+             const originalColor = originalColorsRef.current.get(i) ?? originalColors?.get(i) ?? colorUint;
+
+             if (isErasedNow) {
+               colorData[offset + 3] = originalColor & 0x00FFFFFF; // Transparent
+             } else if (isSelectedNow) {
+               // Yellow: R=255, G=255, B=0, A=255
+               colorData[offset + 3] = (255 << 24) | (0 << 16) | (255 << 8) | 255;
+             } else {
+               colorData[offset + 3] = originalColor; // Restore
+             }
+             
+             modified = true;
+           }
         });
 
         previouslyErasedIndicesRef.current = currentlyErased;
+        previouslySelectedIndicesRef.current = new Set(currentlySelected);
 
         if (modified) {
           covAndColorTexture.needsUpdate = true;
         }
       }
     }
-  }, [erasedIndices, originalColors]);
+  }, [erasedIndices, selectedIndices, originalColors]);
+
+  // Handle invert selection
+  useEffect(() => {
+    if (invertSelectionTrigger > 0) {
+      const splatMesh = groupRef.current?.children[0] as any;
+      if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+        const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+        if (centerAndScaleTexture) {
+          const numSplats = centerAndScaleTexture.image.data.length / 4;
+          const newSelection = new Set<number>();
+          const currentlyErased = new Set(Array.from(erasedIndices?.keys() || []).filter(i => (erasedIndices?.get(i) || 0) > 0));
+          
+          for (let i = 0; i < numSplats; i++) {
+             if (!currentlyErased.has(i) && !selectedIndices.has(i)) {
+               newSelection.add(i);
+             }
+          }
+          setSelectedIndices(newSelection);
+        }
+      }
+    }
+  }, [invertSelectionTrigger]);
 
   const debugProxyRef = useRef(debugProxy);
   useEffect(() => {
     debugProxyRef.current = debugProxy;
   }, [debugProxy]);
+
+  const cachedNoiseFlagsRef = useRef<{
+    flags: Uint8Array | null,
+    params: {
+      proxyDistributionThreshold: number,
+      sorThreshold: number,
+      sorNeighbors: number,
+      volumetricThresholdPercent: number,
+      splatUrl: string | null
+    }
+  }>({
+    flags: null,
+    params: {
+      proxyDistributionThreshold: -1,
+      sorThreshold: -1,
+      sorNeighbors: -1,
+      volumetricThresholdPercent: -1,
+      splatUrl: null
+    }
+  });
 
   const updateProxyColors = useCallback(() => {
     if (!pointsProxyRef.current || !pointsProxyRef.current.geometry) return;
@@ -560,15 +1089,53 @@ function ViewerScene({
     
     const currentlyErased = new Set(Array.from(erasedIndices?.keys() || []).filter(i => (erasedIndices?.get(i) || 0) > 0));
 
-    for (let i = 0; i < numPoints; i++) {
-      if (proxyToSplatIndex && currentlyErased.has(proxyToSplatIndex[i])) continue;
-      const x = Math.floor(positions[i * 3] / cellSize);
-      const y = Math.floor(positions[i * 3 + 1] / cellSize);
-      const z = Math.floor(positions[i * 3 + 2] / cellSize);
-      const key = `${x},${y},${z}`;
-      grid.set(key, (grid.get(key) || 0) + 1);
+    const splatMesh = splatRef.current;
+    let centerData: Float32Array | null = null;
+    let colorData: Uint32Array | null = null;
+
+    if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+      const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (centerAndScaleTexture && covAndColorTexture) {
+        centerData = centerAndScaleTexture.image.data;
+        colorData = covAndColorTexture.image.data;
+      }
     }
-    
+
+    const currentParams = {
+      proxyDistributionThreshold,
+      sorThreshold,
+      sorNeighbors,
+      volumetricThresholdPercent,
+      splatUrl
+    };
+
+    let noiseFlags = cachedNoiseFlagsRef.current.flags;
+    const paramsChanged = 
+      cachedNoiseFlagsRef.current.params.proxyDistributionThreshold !== currentParams.proxyDistributionThreshold ||
+      cachedNoiseFlagsRef.current.params.sorThreshold !== currentParams.sorThreshold ||
+      cachedNoiseFlagsRef.current.params.sorNeighbors !== currentParams.sorNeighbors ||
+      cachedNoiseFlagsRef.current.params.volumetricThresholdPercent !== currentParams.volumetricThresholdPercent ||
+      cachedNoiseFlagsRef.current.params.splatUrl !== currentParams.splatUrl;
+
+    if (!noiseFlags || paramsChanged) {
+      noiseFlags = identifyNoiseSplats(
+        positions,
+        numPoints,
+        proxyToSplatIndex,
+        centerData,
+        colorData,
+        proxyDistributionThreshold,
+        sorThreshold,
+        sorNeighbors,
+        volumetricThresholdPercent
+      );
+      cachedNoiseFlagsRef.current = {
+        flags: noiseFlags,
+        params: currentParams
+      };
+    }
+
     for (let i = 0; i < numPoints; i++) {
       if (proxyToSplatIndex && currentlyErased.has(proxyToSplatIndex[i])) {
         // Hide erased splats
@@ -579,26 +1146,16 @@ function ViewerScene({
         continue;
       }
 
-      const x = Math.floor(positions[i * 3] / cellSize);
-      const y = Math.floor(positions[i * 3 + 1] / cellSize);
-      const z = Math.floor(positions[i * 3 + 2] / cellSize);
-      const key = `${x},${y},${z}`;
-      const count = grid.get(key) || 0;
+      const isRed = noiseFlags[i] === 1;
       
-      if (count > 10) {
-        // Blue (very close)
+      if (!isRed) {
+        // Blue (Not noise)
         colors[i * 4] = 0;
         colors[i * 4 + 1] = 0;
         colors[i * 4 + 2] = 1;
         colors[i * 4 + 3] = 1;
-      } else if (count > 2) {
-        // Green (slightly separated)
-        colors[i * 4] = 0;
-        colors[i * 4 + 1] = 1;
-        colors[i * 4 + 2] = 0;
-        colors[i * 4 + 3] = 1;
       } else {
-        // Red (outliers)
+        // Red (Noise)
         colors[i * 4] = 1;
         colors[i * 4 + 1] = 0;
         colors[i * 4 + 2] = 0;
@@ -614,7 +1171,7 @@ function ViewerScene({
       mat.color.setHex(0xffffff);
       mat.needsUpdate = true;
     }
-  }, [proxyDistributionThreshold, erasedIndices]);
+  }, [proxyDistributionThreshold, sorThreshold, sorNeighbors, volumetricThresholdPercent, erasedIndices, splatUrl]);
 
   useEffect(() => {
     updateProxyColors();
@@ -641,32 +1198,42 @@ function ViewerScene({
       const currentErasedIndices = erasedIndicesRef.current;
       const currentlyErased = new Set(Array.from(currentErasedIndices?.keys() || []).filter(i => (currentErasedIndices?.get(i) || 0) > 0));
 
-      for (let i = 0; i < numPoints; i++) {
-        if (currentlyErased.has(proxyToSplatIndex[i])) continue;
-        const x = Math.floor(positions[i * 3] / cellSize);
-        const y = Math.floor(positions[i * 3 + 1] / cellSize);
-        const z = Math.floor(positions[i * 3 + 2] / cellSize);
-        const key = `${x},${y},${z}`;
-        grid.set(key, (grid.get(key) || 0) + 1);
+      const splatMesh = groupRef.current?.children[0] as any;
+      let centerData: Float32Array | null = null;
+      let colorData: Uint32Array | null = null;
+
+      if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+        const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
+        const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+        if (centerAndScaleTexture && covAndColorTexture) {
+          centerData = centerAndScaleTexture.image.data;
+          colorData = covAndColorTexture.image.data;
+        }
       }
+
+      const noiseFlags = identifyNoiseSplats(
+        positions,
+        numPoints,
+        proxyToSplatIndex,
+        centerData,
+        colorData,
+        proxyDistributionThreshold,
+        sorThreshold,
+        sorNeighbors,
+        volumetricThresholdPercent
+      );
 
       const indicesToErase: number[] = [];
       for (let i = 0; i < numPoints; i++) {
         if (currentlyErased.has(proxyToSplatIndex[i])) continue;
 
-        const x = Math.floor(positions[i * 3] / cellSize);
-        const y = Math.floor(positions[i * 3 + 1] / cellSize);
-        const z = Math.floor(positions[i * 3 + 2] / cellSize);
-        const key = `${x},${y},${z}`;
-        const count = grid.get(key) || 0;
-
-        if (count <= 2) {
+        if (noiseFlags[i] === 1) {
           indicesToErase.push(proxyToSplatIndex[i]);
         }
       }
 
       if (indicesToErase.length > 0 && setEraserHistory && setErasedIndices && setOriginalColors) {
-        setEraserHistory(prev => [...prev, [...indicesToErase]]);
+        setEraserHistory(prev => [...prev, { type: 'noise', indices: [...indicesToErase] }]);
         setErasedIndices(prev => {
           const next = new Map(prev);
           indicesToErase.forEach(idx => {
@@ -952,6 +1519,43 @@ function ViewerScene({
     }
   }, [debugProxy]);
 
+  // 2. Sync to SVG Overlay
+  useEffect(() => {
+    const container = document.getElementById('svg-overlay');
+    if (!container) return;
+    
+    if (!selectionMode || selectionMode === 'brush' || selectionPath2D.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    
+    let html = '';
+    if (selectionMode === 'rect' && selectionPath2D.length >= 2) {
+      const minX = Math.min(selectionPath2D[0].x, selectionPath2D[selectionPath2D.length - 1].x);
+      const minY = Math.min(selectionPath2D[0].y, selectionPath2D[selectionPath2D.length - 1].y);
+      const w = Math.abs(selectionPath2D[selectionPath2D.length - 1].x - selectionPath2D[0].x);
+      const h = Math.abs(selectionPath2D[selectionPath2D.length - 1].y - selectionPath2D[0].y);
+      
+      html = `<svg width="100%" height="100%"><rect x="${minX}" y="${minY}" width="${w}" height="${h}" fill="rgba(79, 70, 229, 0.2)" stroke="rgb(99, 102, 241)" stroke-width="2" stroke-dasharray="4 4" /></svg>`;
+    } else if (selectionMode === 'lasso' || selectionMode === 'polygon') {
+      const isCloseToStart = selectionPath2D.length > 2 && Math.hypot(
+          selectionPath2D[selectionPath2D.length - 1].x - selectionPath2D[0].x,
+          selectionPath2D[selectionPath2D.length - 1].y - selectionPath2D[0].y
+      ) < 20;
+
+      const points = selectionPath2D.map(p => `${p.x},${p.y}`).join(' ');
+      const fill = isCloseToStart ? "rgba(99, 102, 241, 0.4)" : "rgba(79, 70, 229, 0.2)";
+      const stroke = isCloseToStart ? "rgb(250, 204, 21)" : "rgb(99, 102, 241)";
+
+      html = `<svg width="100%" height="100%">
+        <polyline points="${points}" fill="${fill}" stroke="${stroke}" stroke-width="2" stroke-dasharray="4 4" />
+        ${isCloseToStart ? `<circle cx="${selectionPath2D[0].x}" cy="${selectionPath2D[0].y}" r="6" fill="rgb(250, 204, 21)" />` : ''}
+      </svg>`;
+    }
+    
+    container.innerHTML = html;
+  }, [selectionMode, selectionPath2D]);
+
   return (
     <>
       <color attach="background" args={['#171717']} />
@@ -964,16 +1568,21 @@ function ViewerScene({
           <div className="text-neutral-400 font-mono text-sm animate-pulse">Loading Splat...</div>
         </Html>
       }>
-        {splatUrl && (
-          <group ref={groupRef} scale={scale} rotation={rotation} position={splatPosition}>
-            <Splat 
-              name="splat"
-              src={splatUrl} 
-              alphaTest={1 - Math.min(0.99, Math.max(0.01, pointSize))} 
-              visible={!debugProxy && (!isMoving || renderQuality === 'quality')}
-            />
-          </group>
-        )}
+        <group>
+          {layers.find(l => l.id === activeLayerId)?.visible !== false && splatUrl ? (
+            <group ref={groupRef} scale={scale} rotation={rotation} position={splatPosition}>
+              <Splat 
+                name="splat"
+                src={splatUrl} 
+                alphaTest={1 - Math.min(0.99, Math.max(0.01, pointSize))} 
+                visible={!debugProxy && (!isMoving || renderQuality === 'quality')}
+              />
+            </group>
+          ) : null}
+          {layers.filter(l => l.id !== activeLayerId).map(layer => (
+            <LayerSplatComponent key={layer.id} layer={layer} isMoving={isMoving} renderQuality={renderQuality || 'quality'} />
+          ))}
+        </group>
         {visiblePoints.map((point, index) => (
           <Pin 
             key={point.id} 
@@ -982,7 +1591,7 @@ function ViewerScene({
             onUpdate={onUpdatePoint} 
             isSelected={selectedPinId === point.id}
             onSelect={() => {
-              if (isEraserMode) return;
+              if (selectionMode) return;
               setSelectedPinId(point.id);
               setShowDropdown(false);
             }}
@@ -990,14 +1599,14 @@ function ViewerScene({
             showCategories={showPinCategories}
             showFullCategories={showFullCategories}
             onContextMenu={(e) => {
-              if (isEraserMode) return;
+              if (selectionMode) return;
               if (e.type === 'startMove') {
                 setShowDropdown(false);
               } else if (selectedPinId === point.id) {
                 setShowDropdown(true);
               }
             }}
-            isEraserMode={isEraserMode}
+            selectionMode={selectionMode}
           />
         ))}
 
@@ -1100,7 +1709,7 @@ function ViewerScene({
         )}
       </Suspense>
 
-      {ghostPosition && !isEraserMode && (
+      {ghostPosition && !selectionMode && (
         <mesh position={ghostPosition}>
           <sphereGeometry args={[0.05, 16, 16]} />
           <meshStandardMaterial 
@@ -1113,12 +1722,14 @@ function ViewerScene({
         </mesh>
       )}
 
-      {brushPosition && isEraserMode && (
+      {brushPosition && selectionMode === 'brush' && (
         <mesh position={brushPosition}>
           <sphereGeometry args={[brushSize || 0.5, 16, 16]} />
           <meshBasicMaterial color="#ef4444" wireframe transparent opacity={0.5} />
         </mesh>
       )}
+
+      
 
       {/* Calibration Visuals */}
       {isCalibrationMode && calibrationPoints && (
@@ -1169,7 +1780,7 @@ function ViewerScene({
       <OrbitControls 
         makeDefault 
         ref={controlsRef} 
-        enabled={!isShiftPressed && (!isEraserMode || isCtrlPressed)} 
+        enabled={!isShiftPressed && (!selectionMode || isCtrlPressed)} 
         enableDamping={false}
         onChange={() => {
           if (renderQuality === 'efficacy') {
@@ -1187,7 +1798,7 @@ function ViewerScene({
       </GizmoHelper>
     </>
   );
-}
+});
 
 function CalibrationPoint({ pos, i, selectedCalibrationIndex, setSelectedCalibrationIndex, isAdjustingSplat, onUpdateCalibrationPoint }: any) {
   const isControlsVisible = selectedCalibrationIndex === i && !isAdjustingSplat;
@@ -1242,12 +1853,109 @@ function CalibrationPoint({ pos, i, selectedCalibrationIndex, setSelectedCalibra
   );
 }
 
-export default function Viewer(props: ViewerProps) {
+function LayerSplatComponent({ layer, isMoving, renderQuality }: { layer: LayerData, isMoving: boolean, renderQuality: string }) {
+  const groupRef = useRef<THREE.Group>(null);
+
+  useEffect(() => {
+    const splatMesh = groupRef.current?.children[0] as any;
+    if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (covAndColorTexture) {
+        const colorData = covAndColorTexture.image.data;
+        let modified = false;
+
+        const currentlyErased = new Set(Array.from(layer.erasedIndices.keys()).filter(i => (layer.erasedIndices.get(i) || 0) > 0));
+
+        // Restore everything first using originalColors if available
+        for (const [idx, originalColor] of Array.from(layer.originalColors.entries())) {
+          if (!currentlyErased.has(idx)) {
+            const offset = idx * 4;
+            colorData[offset + 3] = originalColor; // Assuming little endian (alpha is the highest byte in Uint32? Wait, the original code uses bitwise ops. No problem, the original code does colorData[offset+0...3])
+          }
+        }
+
+        // We can just rely on the standard trick: if it's erased, hide it.
+        // Actually, without full originalColors logic, we can just hide it by setting point length to 0... but let's copy the erasing logic from the main component. 
+        // For inactive components, they won't be erased interactively, so just syncing once is ok but we need to keep the original color somehow.
+        // Just use the standard trick!
+        const numSplats = colorData.length / 4;
+        for (let i = 0; i < numSplats; i++) {
+          const offset = i * 4;
+          if (currentlyErased.has(i)) {
+             // To hide: make it so small it disappears or alpha to 0. 
+             // Note: In original code, it's: alpha=0 by modifying covAndColorTexture but they restore it from originalColors.
+             // We can just skip complex logic if inactive layers are rarely heavily edited, but we'll try!
+          }
+        }
+      }
+    }
+  }, [layer.erasedIndices, layer.originalColors]);
+
+  // But realistically, inactive layer erasure isn't crucial if the user's focus is on the active layer. Let's just restore erased indices simply if we can.
+  // Wait! The simplest way for LayerSplatComponent is just doing exactly what ViewerScene does:
+  useEffect(() => {
+    const splatMesh = groupRef.current?.children[0] as any;
+    if (splatMesh && splatMesh.material && splatMesh.material.uniforms) {
+      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
+      if (covAndColorTexture) {
+        const colorData = covAndColorTexture.image.data; // Uint32Array
+        let modified = false;
+
+        const currentlyErased = new Set(Array.from(layer.erasedIndices.keys()).filter(i => (layer.erasedIndices.get(i) || 0) > 0));
+        
+        // Restore
+        for (const [idx, origColor] of Array.from(layer.originalColors.entries())) {
+          if (!currentlyErased.has(idx)) {
+            const r = (origColor >> 0) & 0xff;
+            const g = (origColor >> 8) & 0xff;
+            const b = (origColor >> 16) & 0xff;
+            const a = (origColor >> 24) & 0xff;
+            colorData[idx * 4 + 0] = r;
+            colorData[idx * 4 + 1] = g;
+            colorData[idx * 4 + 2] = b;
+            colorData[idx * 4 + 3] = a;
+            modified = true;
+          }
+        }
+
+        // Erase
+        for (let i = 0; i < colorData.length / 4; i++) {
+          if (currentlyErased.has(i)) {
+              if (colorData[i * 4 + 3] !== 0) {
+                 colorData[i * 4 + 3] = 0;
+                 modified = true;
+              }
+          }
+        }
+
+        if (modified) {
+          covAndColorTexture.needsUpdate = true;
+        }
+      }
+    }
+  }, [layer.erasedIndices, layer.originalColors]);
+
+  return (
+    <group ref={groupRef} scale={layer.scale} rotation={layer.rotation} position={layer.splatPosition}>
+      {layer.splatUrl ? (
+        <Splat 
+          name="splat"
+          src={layer.splatUrl} 
+          alphaTest={1 - Math.min(0.99, Math.max(0.01, layer.pointSize))} 
+          visible={layer.visible && (!isMoving || renderQuality === 'quality')}
+        />
+      ) : null}
+    </group>
+  );
+}
+
+export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
   const controlsRef = useRef<any>(null);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   const [isCtrlPressed, setIsCtrlPressed] = useState(false);
   const [selectedCalibrationIndex, setSelectedCalibrationIndex] = useState<number | null>(null);
   const [isTyping, setIsTyping] = useState(false);
+  const [selectionPath2D, setSelectionPath2D] = useState<{ x: number, y: number }[]>([]);
 
   useEffect(() => {
     const handleFocus = (e: FocusEvent) => {
@@ -1277,7 +1985,7 @@ export default function Viewer(props: ViewerProps) {
       if (e.key === 'Control') setIsCtrlPressed(true);
       
       // Ctrl+Z for undo
-      if (e.key === 'z' && e.ctrlKey && props.isEraserMode && !isTyping) {
+      if (e.key === 'z' && e.ctrlKey && props.selectionMode && !isTyping) {
         if (props.eraserHistory && props.eraserHistory.length > 0 && props.setEraserHistory && props.setErasedIndices) {
           const newHistory = [...props.eraserHistory];
           const lastStroke = newHistory.pop();
@@ -1286,7 +1994,7 @@ export default function Viewer(props: ViewerProps) {
             props.setEraserHistory(newHistory);
             props.setErasedIndices(prev => {
               const next = new Map(prev);
-              lastStroke.forEach(idx => {
+              lastStroke.indices.forEach(idx => {
                 const count = next.get(idx) || 0;
                 if (count <= 1) next.delete(idx);
                 else next.set(idx, count - 1);
@@ -1307,7 +2015,7 @@ export default function Viewer(props: ViewerProps) {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [props.isEraserMode, isTyping, props.eraserHistory, props.setEraserHistory, props.setErasedIndices]);
+  }, [props.selectionMode, isTyping, props.eraserHistory, props.setEraserHistory, props.setErasedIndices]);
 
   const keyboardMap = [
     { name: 'forward', keys: ['ArrowUp', 'w', 'W'] },
@@ -1319,6 +2027,21 @@ export default function Viewer(props: ViewerProps) {
   ];
 
   const wasdEnabled = props.useWASD && !isTyping;
+  const viewerSceneRef = useRef<ViewerHandle>(null);
+
+  useImperativeHandle(ref, () => ({
+    exportExemplar: async () => {
+      if (viewerSceneRef.current) {
+        await viewerSceneRef.current.exportExemplar();
+      }
+    },
+    exportCleanedPly: async () => {
+      if (viewerSceneRef.current) {
+        return await (viewerSceneRef.current as any).exportCleanedPly();
+      }
+      return null;
+    }
+  }));
 
   return (
     <div className="w-full h-full bg-neutral-900 relative">
@@ -1333,6 +2056,7 @@ export default function Viewer(props: ViewerProps) {
         >
           <ViewerScene 
             {...props} 
+            ref={viewerSceneRef}
             isShiftPressed={isShiftPressed} 
             isCtrlPressed={isCtrlPressed}
             controlsRef={controlsRef} 
@@ -1347,7 +2071,7 @@ export default function Viewer(props: ViewerProps) {
       {/* Overlay info */}
       <div className="absolute bottom-6 right-6 pointer-events-none">
         <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-lg p-3 text-xs text-neutral-400 font-mono flex flex-col gap-1">
-          {props.isEraserMode ? (
+          {props.selectionMode ? (
             <>
               <div>Left Click + Drag: Erase</div>
               <div>Ctrl + Drag: Move View</div>
@@ -1371,4 +2095,4 @@ export default function Viewer(props: ViewerProps) {
       </div>
     </div>
   );
-}
+});

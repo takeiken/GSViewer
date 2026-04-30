@@ -1,0 +1,6 @@
+pymaxflow
+opencv-python
+matplotlib
+openexr
+nerfview
+splines

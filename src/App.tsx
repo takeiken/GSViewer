@@ -1,10 +1,12 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-import Viewer from './components/Viewer';
+import Viewer, { ViewerHandle } from './components/Viewer';
 import Sidebar from './components/Sidebar';
 import NotificationContainer, { NotificationItem, NotificationType } from './components/Notification';
 import WidgetPanel from './components/WidgetPanel';
+import LayerWidget from './components/LayerWidget';
+import SelectionWidget from './components/SelectionWidget';
 
 export type Point = {
   id: string;
@@ -16,6 +18,11 @@ export type Point = {
 export type SplatSource = {
   type: 'url' | 'file';
   value: string;
+};
+
+export type EraserStroke = {
+  type: 'manual' | 'noise';
+  indices: number[];
 };
 
 export type PinCategory = {
@@ -33,6 +40,24 @@ export type WGS84Coordinate = {
   lng: number;
 };
 
+export type LayerData = {
+  id: string;
+  name: string;
+  visible: boolean;
+  splatUrl: string;
+  splatSource: SplatSource;
+  scale: number;
+  rotation: [number, number, number];
+  splatPosition: [number, number, number];
+  pointSize: number;
+  threshold: number;
+  splatViewDistance: number;
+  eraserHistory: EraserStroke[];
+  erasedIndices: Map<number, number>;
+  selectedIndices: Set<number>;
+  originalColors: Map<number, number>;
+};
+
 export type WGS84Calibration = {
   p1: [number, number, number];
   p2: [number, number, number];
@@ -41,13 +66,69 @@ export type WGS84Calibration = {
 };
 
 export default function App() {
-  const [splatUrl, setSplatUrl] = useState<string>('https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat');
-  const [splatSource, setSplatSource] = useState<SplatSource>({ type: 'url', value: 'https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat' });
-  const [scale, setScale] = useState<number>(1);
-  const [pointSize, setPointSize] = useState<number>(1);
-  const [threshold, setThreshold] = useState<number>(0.1);
-  const [rotation, setRotation] = useState<[number, number, number]>([0, 0, 0]);
-  const [splatPosition, setSplatPosition] = useState<[number, number, number]>([0, 0, 0]);
+  const viewerRef = useRef<ViewerHandle>(null);
+  const [isTiling, setIsTiling] = useState(false);
+  
+  const [layers, setLayers] = useState<LayerData[]>([{
+    id: uuidv4(),
+    name: 'Main Splat',
+    visible: true,
+    splatUrl: 'https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat',
+    splatSource: { type: 'url', value: 'https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/bonsai/bonsai-7k.splat' },
+    scale: 1,
+    rotation: [0, 0, 0],
+    splatPosition: [0, 0, 0],
+    pointSize: 1,
+    threshold: 0.1,
+    splatViewDistance: 0,
+    erasedIndices: new Map(),
+    selectedIndices: new Set(),
+    eraserHistory: [],
+    originalColors: new Map(),
+  }]);
+  const [activeLayerId, setActiveLayerId] = useState<string>(layers[0].id);
+
+  const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0];
+
+  const updateActiveLayer = useCallback((updates: Partial<LayerData>) => {
+    setLayers(prev => prev.map(l => l.id === (activeLayerId || prev[0].id) ? { ...l, ...updates } : l));
+  }, [activeLayerId]);
+
+  const splatUrl = activeLayer.splatUrl;
+  const setSplatUrl = (url: string) => updateActiveLayer({ splatUrl: url });
+
+  const splatSource = activeLayer.splatSource;
+  const setSplatSource = (source: SplatSource) => updateActiveLayer({ splatSource: source });
+
+  const scale = activeLayer.scale;
+  const setScale = (s: number | ((prev: number) => number)) => updateActiveLayer({ scale: typeof s === 'function' ? s(activeLayer.scale) : s });
+
+  const pointSize = activeLayer.pointSize;
+  const setPointSize = (s: number | ((prev: number) => number)) => updateActiveLayer({ pointSize: typeof s === 'function' ? s(activeLayer.pointSize) : s });
+
+  const threshold = activeLayer.threshold;
+  const setThreshold = (s: number | ((prev: number) => number)) => updateActiveLayer({ threshold: typeof s === 'function' ? s(activeLayer.threshold) : s });
+
+  const rotation = activeLayer.rotation;
+  const setRotation = (s: [number, number, number] | ((prev: [number, number, number]) => [number, number, number])) => updateActiveLayer({ rotation: typeof s === 'function' ? s(activeLayer.rotation) : s });
+
+  const splatPosition = activeLayer.splatPosition;
+  const setSplatPosition = (s: [number, number, number] | ((prev: [number, number, number]) => [number, number, number])) => updateActiveLayer({ splatPosition: typeof s === 'function' ? s(activeLayer.splatPosition) : s });
+
+  const splatViewDistance = activeLayer.splatViewDistance;
+  const setSplatViewDistance = (s: number | ((prev: number) => number)) => updateActiveLayer({ splatViewDistance: typeof s === 'function' ? s(activeLayer.splatViewDistance) : s });
+
+  const erasedIndices = activeLayer.erasedIndices;
+  const setErasedIndices = (val: any) => updateActiveLayer({ erasedIndices: typeof val === 'function' ? val(activeLayer.erasedIndices) : val });
+
+  const selectedIndices = activeLayer.selectedIndices;
+  const setSelectedIndices = (val: any) => updateActiveLayer({ selectedIndices: typeof val === 'function' ? val(activeLayer.selectedIndices) : val });
+
+  const eraserHistory = activeLayer.eraserHistory;
+  const setEraserHistory = (val: any) => updateActiveLayer({ eraserHistory: typeof val === 'function' ? val(activeLayer.eraserHistory) : val });
+
+  const originalColors = activeLayer.originalColors;
+  const setOriginalColors = (val: any) => updateActiveLayer({ originalColors: typeof val === 'function' ? val(activeLayer.originalColors) : val });
   const [gridSize, setGridSize] = useState<number>(10);
   const [gridDivisions, setGridDivisions] = useState<number>(10);
   const [gridThickness, setGridThickness] = useState<number>(1.0);
@@ -70,28 +151,34 @@ export default function App() {
 
   // Calibration State
   const [isCalibrationMode, setIsCalibrationMode] = useState(false);
+  const [calibrationMethod, setCalibrationMethod] = useState<'size' | 'vertical_marker'>('size');
   const [calibrationPoints, setCalibrationPoints] = useState<[number, number, number][]>([]);
   const [recreateProxyTrigger, setRecreateProxyTrigger] = useState(0);
   const [removeRedProxiesTrigger, setRemoveRedProxiesTrigger] = useState(0);
   const [debugProxy, setDebugProxy] = useState(false);
   const [proxyDistributionThreshold, setProxyDistributionThreshold] = useState(0.1);
+  const [sorThreshold, setSorThreshold] = useState(2.0);
+  const [sorNeighbors, setSorNeighbors] = useState(20);
+  const [volumetricThresholdPercent, setVolumetricThresholdPercent] = useState(10.0);
+  const [splatExportFileName, setSplatExportFileName] = useState('cleaned_model.splat');
+  const [exportFormat, setExportFormat] = useState<'splat' | 'ply'>('splat');
 
-  // Eraser State
-  const [isEraserMode, setIsEraserMode] = useState(false);
+  // Selection State
+  const [selectionMode, setSelectionMode] = useState<'rect' | 'lasso' | 'polygon' | 'brush' | null>(null);
+  const [selectionPenetrate, setSelectionPenetrate] = useState(true);
   const [brushSize, setBrushSize] = useState(0.5);
-  const [eraserHistory, setEraserHistory] = useState<number[][]>([]);
-  const [erasedIndices, setErasedIndices] = useState<Map<number, number>>(new Map());
-  const [originalColors, setOriginalColors] = useState<Map<number, number>>(new Map());
+  const [invertSelectionTrigger, setInvertSelectionTrigger] = useState(0);
+
+  // Layer History State
+  const [deletedLayersHistory, setDeletedLayersHistory] = useState<LayerData[]>([]);
+  const [undoneDeletedLayersHistory, setUndoneDeletedLayersHistory] = useState<LayerData[]>([]);
 
   // Connection State
   const [connectedPinIds, setConnectedPinIds] = useState<string[]>([]);
   const [connectionLineColor, setConnectionLineColor] = useState<string>('#00ff00');
 
   useEffect(() => {
-    setIsEraserMode(false);
-    setEraserHistory([]);
-    setErasedIndices(new Map());
-    setOriginalColors(new Map());
+    setSelectionMode(null);
   }, [splatUrl]);
 
   useEffect(() => {
@@ -185,10 +272,15 @@ export default function App() {
     addNotification(`Field ${field} ${nextLocked ? 'locked' : 'unlocked'}`, 'info');
   }, [lockedFields, addNotification]);
 
-  const handleStartCalibration = () => {
+  const handleStartCalibration = (method: 'size' | 'vertical_marker') => {
     setIsCalibrationMode(true);
+    setCalibrationMethod(method);
     setCalibrationPoints([]);
-    addNotification('Calibration Mode: Shift+Click two points to define distance', 'info');
+    if (method === 'vertical_marker') {
+      addNotification('Vertical Marker: Shift+Click higher point, then lower point.', 'info');
+    } else {
+      addNotification('Calibration Mode: Shift+Click two points to define distance', 'info');
+    }
   };
 
   const handleCancelCalibration = () => {
@@ -230,9 +322,20 @@ export default function App() {
     }
 
     const newGridSize = (virtualDistance / realDistance) * 0.1 * gridDivisions;
-    
     setGridSize(newGridSize);
     setLockedFields(prev => ({ ...prev, gridSize: true }));
+
+    if (calibrationMethod === 'vertical_marker') {
+      const v = new THREE.Vector3(dx, dy, dz);
+      v.normalize();
+      const targetV = new THREE.Vector3(0, 1, 0); // pointing up
+      const deltaQ = new THREE.Quaternion().setFromUnitVectors(v, targetV);
+      const currentQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotation));
+      const nextQ = deltaQ.multiply(currentQ);
+      const nextEuler = new THREE.Euler().setFromQuaternion(nextQ, 'XYZ');
+      updateSplatTransform(undefined, [nextEuler.x, nextEuler.y, nextEuler.z], undefined);
+    }
+    
     setIsCalibrationMode(false);
     
     if (wgs1 && wgs2) {
@@ -384,6 +487,7 @@ export default function App() {
       if (settings.grid?.divisions !== undefined) setGridDivisions(settings.grid.divisions);
       if (settings.grid?.thickness !== undefined) setGridThickness(settings.grid.thickness);
       if (settings.grid?.viewDistance !== undefined) setViewDistance(settings.grid.viewDistance);
+      if (settings.transform?.splatViewDistance !== undefined) setSplatViewDistance(settings.transform.splatViewDistance);
       if (settings.navigation?.moveSpeed !== undefined) setMoveSpeed(settings.navigation.moveSpeed);
       if (settings.pins) setPoints(settings.pins);
       if (settings.pinCategories) setPinCategories(settings.pinCategories);
@@ -397,12 +501,144 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      
+      // Ctrl+Shift+Z or Ctrl+Y for redo layer deletion if not in eraser mode
+      if (((e.key === 'z' && e.ctrlKey && e.shiftKey) || (e.key === 'y' && e.ctrlKey)) && !selectionMode) {
+        setUndoneDeletedLayersHistory(prev => {
+          if (prev.length === 0) return prev;
+          const layerToDelete = prev[prev.length - 1];
+          setLayers(oldLayers => {
+            const newLayers = oldLayers.filter(l => l.id !== layerToDelete.id);
+            if (activeLayerId === layerToDelete.id) {
+              if (newLayers.length > 0) setActiveLayerId(newLayers[0].id);
+              else setActiveLayerId('');
+            }
+            return newLayers;
+          });
+          setDeletedLayersHistory(oldArr => [...oldArr, layerToDelete]);
+          addNotification(`Redid delete layer: ${layerToDelete.name}`, 'info');
+          return prev.slice(0, -1);
+        });
+        return;
+      }
+
+      // Ctrl+Z for undo layer deletion if not in eraser mode
+      if (e.key === 'z' && e.ctrlKey && !e.shiftKey && !selectionMode) {
+        setDeletedLayersHistory(prev => {
+          if (prev.length === 0) return prev;
+          const lastDeleted = prev[prev.length - 1];
+          setLayers(oldLayers => [...oldLayers, lastDeleted]);
+          setActiveLayerId(lastDeleted.id);
+          setUndoneDeletedLayersHistory(oldArr => [...oldArr, lastDeleted]);
+          addNotification(`Restored layer: ${lastDeleted.name}`, 'info');
+          return prev.slice(0, -1);
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [selectionMode, activeLayerId, addNotification]);
+
+  const handleExemplarExported = async (blob: Blob) => {
+    setIsTiling(true);
+    addNotification('Uploading exemplar and processing auto-tiling...', 'info');
+
+    try {
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve) => {
+        reader.onload = () => {
+          const res = reader.result as string;
+          resolve(res.split(',')[1]); // get base64 part
+        };
+        reader.readAsDataURL(blob);
+      });
+
+      const base64Data = await base64Promise;
+
+      addNotification('Running Step 1 (exemplar_to_tile.py)...', 'info');
+      const response1 = await fetch('/api/auto-tile-step1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exemplarPlyData: base64Data }),
+      });
+
+      if (!response1.ok) {
+        const err = await response1.json();
+        throw new Error(err.error || 'Auto-tiling Step 1 failed');
+      }
+
+      const result1 = await response1.json();
+      addNotification(result1.message, 'success');
+
+      addNotification('Running Step 2 (transform_splat_tile.py)...', 'info');
+      const response2 = await fetch('/api/auto-tile-step2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (!response2.ok) {
+        const err = await response2.json();
+        throw new Error(err.error || 'Auto-tiling Step 2 failed');
+      }
+
+      const result2 = await response2.json();
+      addNotification(result2.message, 'success');
+
+      // Trigger download
+      window.location.href = result2.downloadUrl;
+    } catch (error) {
+      console.error(error);
+      addNotification(`Auto-tiling error: ${(error as Error).message}`, 'error');
+    } finally {
+      setIsTiling(false);
+    }
+  };
+
+  const handleAutoTile = () => {
+    if (viewerRef.current) {
+      viewerRef.current.exportExemplar();
+    }
+  };
+
+  const handleExportCleanedPly = async (filename: string) => {
+    if (!viewerRef.current) return;
+    addNotification('Preparing PLY export...', 'info');
+    try {
+      const blob = await (viewerRef.current as any).exportCleanedPly();
+      if (!blob) throw new Error('Failed to generate PLY blob');
+      
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename.toLowerCase().endsWith('.ply') ? filename : `${filename}.ply`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addNotification('PLY exported successfully!', 'success');
+    } catch (error) {
+      console.error(error);
+      addNotification('Failed to export PLY.', 'error');
+    }
+  };
+
   return (
     <div 
       className="flex h-screen w-full bg-neutral-900 text-neutral-100 font-sans overflow-hidden select-none"
       onContextMenu={(e) => e.preventDefault()}
     >
       <Sidebar
+        layers={layers}
+        setLayers={setLayers}
+        activeLayerId={activeLayerId}
+        setActiveLayerId={setActiveLayerId}
         splatUrl={splatUrl}
         setSplatUrl={setSplatUrl}
         splatSource={splatSource}
@@ -436,6 +672,8 @@ export default function App() {
         setMoveSpeed={setMoveSpeed}
         viewDistance={viewDistance}
         setViewDistance={setViewDistance}
+        splatViewDistance={splatViewDistance}
+        setSplatViewDistance={setSplatViewDistance}
         addNotification={addNotification}
         onImportSettings={handleImportSettings}
         lockedFields={lockedFields}
@@ -451,6 +689,12 @@ export default function App() {
         setDebugProxy={setDebugProxy}
         proxyDistributionThreshold={proxyDistributionThreshold}
         setProxyDistributionThreshold={setProxyDistributionThreshold}
+        sorThreshold={sorThreshold}
+        setSorThreshold={setSorThreshold}
+        sorNeighbors={sorNeighbors}
+        setSorNeighbors={setSorNeighbors}
+        volumetricThresholdPercent={volumetricThresholdPercent}
+        setVolumetricThresholdPercent={setVolumetricThresholdPercent}
         onInteractionStart={() => setIsAdjustingSplat(true)}
         onInteractionEnd={() => setIsAdjustingSplat(false)}
         pinCategories={pinCategories}
@@ -464,8 +708,6 @@ export default function App() {
         setShowFullCategories={setShowFullCategories}
         renderQuality={renderQuality}
         setRenderQuality={setRenderQuality}
-        isEraserMode={isEraserMode}
-        setIsEraserMode={setIsEraserMode}
         brushSize={brushSize}
         setBrushSize={setBrushSize}
         eraserHistory={eraserHistory}
@@ -475,9 +717,18 @@ export default function App() {
         originalColors={originalColors}
         setOriginalColors={setOriginalColors}
         wgs84Calibration={wgs84Calibration}
+        splatExportFileName={splatExportFileName}
+        setSplatExportFileName={setSplatExportFileName}
+        exportFormat={exportFormat}
+        setExportFormat={setExportFormat}
+        onExportPly={handleExportCleanedPly}
       />
       <main className="flex-1 relative">
+        <div id="svg-overlay" className="absolute top-0 left-0 w-full h-full pointer-events-none z-50"></div>
         <Viewer
+          ref={viewerRef}
+          layers={layers}
+          activeLayerId={activeLayerId}
           splatUrl={splatUrl}
           scale={scale}
           pointSize={pointSize}
@@ -496,6 +747,7 @@ export default function App() {
           useWASD={useWASD}
           moveSpeed={moveSpeed}
           viewDistance={viewDistance}
+          splatViewDistance={splatViewDistance}
           isCalibrationMode={isCalibrationMode}
           calibrationPoints={calibrationPoints}
           onCalibrationPointClick={handleCalibrationPointClick}
@@ -504,6 +756,9 @@ export default function App() {
           removeRedProxiesTrigger={removeRedProxiesTrigger}
           debugProxy={debugProxy}
           proxyDistributionThreshold={proxyDistributionThreshold}
+          sorThreshold={sorThreshold}
+          sorNeighbors={sorNeighbors}
+          volumetricThresholdPercent={volumetricThresholdPercent}
           isAdjustingSplat={isAdjustingSplat}
           pinCategories={pinCategories}
           onUpdatePointCategories={handleUpdatePointCategories}
@@ -512,16 +767,21 @@ export default function App() {
           pinFilter={pinFilter}
           renderQuality={renderQuality}
           onDeletePoint={handleDeletePoint}
-          isEraserMode={isEraserMode}
+          selectionMode={selectionMode}
+          selectionPenetrate={selectionPenetrate}
           brushSize={brushSize}
           eraserHistory={eraserHistory}
           setEraserHistory={setEraserHistory}
           erasedIndices={erasedIndices}
           setErasedIndices={setErasedIndices}
+          selectedIndices={selectedIndices}
+          setSelectedIndices={setSelectedIndices}
+          invertSelectionTrigger={invertSelectionTrigger}
           originalColors={originalColors}
           setOriginalColors={setOriginalColors}
           connectedPinIds={connectedPinIds}
           connectionLineColor={connectionLineColor}
+          onExemplarExported={handleExemplarExported}
         />
         <WidgetPanel
           points={points}
@@ -532,6 +792,53 @@ export default function App() {
           setConnectedPinIds={setConnectedPinIds}
           connectionLineColor={connectionLineColor}
           setConnectionLineColor={setConnectionLineColor}
+        />
+        <LayerWidget
+          layers={layers}
+          setLayers={setLayers}
+          activeLayerId={activeLayerId}
+          setActiveLayerId={setActiveLayerId}
+          deletedLayersHistory={deletedLayersHistory}
+          setDeletedLayersHistory={setDeletedLayersHistory}
+          undoneDeletedLayersHistory={undoneDeletedLayersHistory}
+          setUndoneDeletedLayersHistory={setUndoneDeletedLayersHistory}
+        />
+        <SelectionWidget
+          selectionMode={selectionMode}
+          setSelectionMode={setSelectionMode}
+          selectionPenetrate={selectionPenetrate}
+          setSelectionPenetrate={setSelectionPenetrate}
+          brushSize={brushSize}
+          setBrushSize={setBrushSize}
+          hasSelection={selectedIndices.size > 0}
+          isProcessing={isTiling}
+          onAutoTile={handleAutoTile}
+          onEraseSelected={() => {
+            if (selectedIndices.size === 0) return;
+            // Record eraser history
+            const newStroke = {
+              type: 'manual' as const,
+              indices: Array.from(selectedIndices)
+            };
+            setEraserHistory(prev => [...prev, newStroke]);
+            // Apply erased
+            setErasedIndices((prev: Map<number, number>) => {
+              const next = new Map(prev);
+              selectedIndices.forEach(idx => {
+                const current = next.get(idx) || 0;
+                next.set(idx, current + 1);
+              });
+              return next;
+            });
+            // Clear selection
+            setSelectedIndices(new Set());
+          }}
+          onInvertSelection={() => {
+            setInvertSelectionTrigger(prev => prev + 1);
+          }}
+          onClearSelection={() => {
+            setSelectedIndices(new Set());
+          }}
         />
         <NotificationContainer notifications={notifications} removeNotification={removeNotification} />
       </main>

@@ -1,11 +1,17 @@
 import { useState, useEffect } from 'react';
-import type { Point, SplatSource, PinFilter, PinCategory } from '../App';
-import { Trash2, Plus, Upload, Pencil, Lock, Unlock, RotateCcw, Download, FileDown, FileUp, AlertTriangle, Filter, X } from 'lucide-react';
+import type { Point, SplatSource, PinFilter, PinCategory, EraserStroke, LayerData } from '../App';
+import { Trash2, Plus, Upload, Pencil, Lock, Unlock, RotateCcw, Download, FileDown, FileUp, AlertTriangle, Filter, X, Eye, EyeOff, Layers } from 'lucide-react';
 import * as spz from 'spz-js';
 import { convertToSplat } from '../utils/splatConverter';
+import { splatToPly } from '../utils/splatToPly';
 import { NotificationType } from './Notification';
+import { v4 as uuidv4 } from 'uuid';
 
 type SidebarProps = {
+  layers: LayerData[];
+  setLayers: React.Dispatch<React.SetStateAction<LayerData[]>>;
+  activeLayerId: string;
+  setActiveLayerId: (id: string) => void;
   splatUrl: string;
   setSplatUrl: (url: string) => void;
   splatSource: SplatSource;
@@ -39,13 +45,15 @@ type SidebarProps = {
   setMoveSpeed: (speed: number) => void;
   viewDistance: number;
   setViewDistance: (distance: number) => void;
+  splatViewDistance: number;
+  setSplatViewDistance: (distance: number) => void;
   addNotification: (message: string, type: NotificationType) => void;
   onImportSettings: (settings: any) => void;
   lockedFields: Record<string, boolean>;
   onToggleLock: (field: string) => void;
   isCalibrationMode: boolean;
   calibrationPoints: [number, number, number][];
-  onStartCalibration: () => void;
+  onStartCalibration: (method: 'size' | 'vertical_marker') => void;
   onCancelCalibration: () => void;
   onApplyCalibration: (distance: number, wgs1?: {lat: number, lng: number}, wgs2?: {lat: number, lng: number}) => void;
   onRecreateProxy: () => void;
@@ -54,6 +62,12 @@ type SidebarProps = {
   setDebugProxy: (debug: boolean) => void;
   proxyDistributionThreshold: number;
   setProxyDistributionThreshold: (threshold: number) => void;
+  sorThreshold: number;
+  setSorThreshold: (threshold: number) => void;
+  sorNeighbors: number;
+  setSorNeighbors: (neighbors: number) => void;
+  volumetricThresholdPercent: number;
+  setVolumetricThresholdPercent: (percent: number) => void;
   onInteractionStart: () => void;
   onInteractionEnd: () => void;
   pinCategories: PinCategory[];
@@ -67,12 +81,10 @@ type SidebarProps = {
   setShowFullCategories: (show: boolean) => void;
   renderQuality: 'quality' | 'efficacy';
   setRenderQuality: (quality: 'quality' | 'efficacy') => void;
-  isEraserMode: boolean;
-  setIsEraserMode: (mode: boolean) => void;
   brushSize: number;
   setBrushSize: (size: number) => void;
-  eraserHistory: number[][];
-  setEraserHistory: React.Dispatch<React.SetStateAction<number[][]>>;
+  eraserHistory: EraserStroke[];
+  setEraserHistory: React.Dispatch<React.SetStateAction<EraserStroke[]>>;
   erasedIndices: Map<number, number>;
   setErasedIndices: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   originalColors: Map<number, number>;
@@ -83,6 +95,11 @@ type SidebarProps = {
     wgs1: { lat: number; lng: number };
     wgs2: { lat: number; lng: number };
   } | null;
+  splatExportFileName: string;
+  setSplatExportFileName: (name: string) => void;
+  exportFormat: 'splat' | 'ply';
+  setExportFormat: (format: 'splat' | 'ply') => void;
+  onExportPly: (filename: string) => Promise<void>;
 };
 
 const BufferedInput = ({ 
@@ -132,6 +149,10 @@ const BufferedInput = ({
 };
 
 export default function Sidebar({
+  layers,
+  setLayers,
+  activeLayerId,
+  setActiveLayerId,
   splatUrl,
   setSplatUrl,
   splatSource,
@@ -165,6 +186,8 @@ export default function Sidebar({
   setMoveSpeed,
   viewDistance,
   setViewDistance,
+  splatViewDistance,
+  setSplatViewDistance,
   addNotification,
   onImportSettings,
   lockedFields,
@@ -180,6 +203,12 @@ export default function Sidebar({
   setDebugProxy,
   proxyDistributionThreshold,
   setProxyDistributionThreshold,
+  sorThreshold,
+  setSorThreshold,
+  sorNeighbors,
+  setSorNeighbors,
+  volumetricThresholdPercent,
+  setVolumetricThresholdPercent,
   onInteractionStart,
   onInteractionEnd,
   pinCategories,
@@ -193,8 +222,6 @@ export default function Sidebar({
   setShowFullCategories,
   renderQuality,
   setRenderQuality,
-  isEraserMode,
-  setIsEraserMode,
   brushSize,
   setBrushSize,
   eraserHistory,
@@ -204,6 +231,11 @@ export default function Sidebar({
   originalColors,
   setOriginalColors,
   wgs84Calibration,
+  splatExportFileName,
+  setSplatExportFileName,
+  exportFormat,
+  setExportFormat,
+  onExportPly,
 }: SidebarProps) {
   const [inputUrl, setInputUrl] = useState(splatUrl);
   const [editingNameId, setEditingNameId] = useState<string | null>(null);
@@ -219,13 +251,27 @@ export default function Sidebar({
   const [newCategoryName, setNewCategoryName] = useState('');
   const [showFilter, setShowFilter] = useState(false);
   const [editingCategoriesId, setEditingCategoriesId] = useState<string | null>(null);
-  const [splatExportFileName, setSplatExportFileName] = useState('cleaned_model.splat');
   const [settingsExportFileName, setSettingsExportFileName] = useState('splat-view-settings.json');
   const [localProxyThreshold, setLocalProxyThreshold] = useState(proxyDistributionThreshold);
+  const [localSorThreshold, setLocalSorThreshold] = useState(sorThreshold);
+  const [localSorNeighbors, setLocalSorNeighbors] = useState(sorNeighbors);
+  const [localVolumetricThresholdPercent, setLocalVolumetricThresholdPercent] = useState(volumetricThresholdPercent);
 
   useEffect(() => {
     setLocalProxyThreshold(proxyDistributionThreshold);
   }, [proxyDistributionThreshold]);
+
+  useEffect(() => {
+    setLocalSorThreshold(sorThreshold);
+  }, [sorThreshold]);
+
+  useEffect(() => {
+    setLocalSorNeighbors(sorNeighbors);
+  }, [sorNeighbors]);
+
+  useEffect(() => {
+    setLocalVolumetricThresholdPercent(volumetricThresholdPercent);
+  }, [volumetricThresholdPercent]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -307,6 +353,7 @@ export default function Sidebar({
     if (!isLocked('threshold')) setThreshold(1);
     if (!isLocked('position')) setSplatPosition([0, 0, 0]);
     if (!isLocked('rotation')) setRotation([0, 0, 0]);
+    if (!isLocked('splatViewDistance')) setSplatViewDistance(0);
     addNotification('Transform section reset', 'info');
   };
 
@@ -325,7 +372,7 @@ export default function Sidebar({
         type: splatSource.type,
         value: splatSource.value
       },
-      transform: { scale, pointSize, threshold, position: splatPosition, rotation },
+      transform: { scale, pointSize, threshold, position: splatPosition, rotation, splatViewDistance },
       grid: { size: gridSize, divisions: gridDivisions, viewDistance, thickness: gridThickness },
       navigation: { moveSpeed },
       pins: points.map(p => ({
@@ -450,58 +497,69 @@ export default function Sidebar({
     }
   };
 
-  const handleExportSplat = async () => {
+  const handleExport = async () => {
     try {
       addNotification('Preparing export...', 'info');
       
-      // Fetch the original splat file
+      // Fetch the internal splat buffer (all loaded files are converted to .splat internally)
       const response = await fetch(splatUrl);
       const buffer = await response.arrayBuffer();
       
-      // A standard .splat file has 32 bytes per splat
-      const splatSize = 32;
-      const numSplats = buffer.byteLength / splatSize;
-      
-      // Calculate new size
-      const newNumSplats = numSplats - erasedIndices.size;
-      const newBuffer = new ArrayBuffer(newNumSplats * splatSize);
-      
-      const srcView = new Uint8Array(buffer);
-      const dstView = new Uint8Array(newBuffer);
-      
-      let dstIndex = 0;
-      for (let i = 0; i < numSplats; i++) {
-        if (!erasedIndices.has(i)) {
-          // Copy 32 bytes
-          const srcOffset = i * splatSize;
-          const dstOffset = dstIndex * splatSize;
-          dstView.set(srcView.subarray(srcOffset, srcOffset + splatSize), dstOffset);
-          dstIndex++;
+      let blob: Blob;
+      let finalName = splatExportFileName.trim();
+
+      if (exportFormat === 'ply') {
+        blob = splatToPly(buffer, erasedIndices);
+        finalName = finalName || 'cleaned_model.ply';
+        if (!finalName.toLowerCase().endsWith('.ply')) {
+          finalName += '.ply';
+        }
+      } else {
+        // A standard .splat file has 32 bytes per splat
+        const splatSize = 32;
+        const numSplatsInFile = buffer.byteLength / splatSize;
+        
+        let keptCount = 0;
+        for (let i = 0; i < numSplatsInFile; i++) {
+          if (!((erasedIndices.get(i) || 0) > 0)) {
+            keptCount++;
+          }
+        }
+        
+        const newBuffer = new ArrayBuffer(keptCount * splatSize);
+        const srcView = new Uint8Array(buffer);
+        const dstView = new Uint8Array(newBuffer);
+        
+        let dstIndex = 0;
+        for (let i = 0; i < numSplatsInFile; i++) {
+          if (!((erasedIndices.get(i) || 0) > 0)) {
+            const srcOffset = i * splatSize;
+            const dstOffset = dstIndex * splatSize;
+            dstView.set(srcView.subarray(srcOffset, srcOffset + splatSize), dstOffset);
+            dstIndex++;
+          }
+        }
+        
+        blob = new Blob([newBuffer], { type: 'application/octet-stream' });
+        finalName = finalName || 'cleaned_model.splat';
+        if (!finalName.toLowerCase().endsWith('.splat')) {
+          finalName += '.splat';
         }
       }
-      
-      // Create and download blob
-      const blob = new Blob([newBuffer], { type: 'application/octet-stream' });
+
       const url = URL.createObjectURL(blob);
-      
       const a = document.createElement('a');
       a.href = url;
-      
-      let finalName = splatExportFileName.trim() || 'cleaned_model.splat';
-      if (!finalName.toLowerCase().endsWith('.splat')) {
-        finalName += '.splat';
-      }
       a.download = finalName;
-      
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       
-      addNotification(`Exported ${newNumSplats} splats successfully!`, 'success');
+      addNotification(`Exported ${finalName} successfully!`, 'success');
     } catch (error) {
-      console.error('Error exporting splat:', error);
-      addNotification('Failed to export splat file.', 'error');
+      console.error('Error exporting file:', error);
+      addNotification('Failed to export file.', 'error');
     }
   };
 
@@ -554,12 +612,19 @@ export default function Sidebar({
               </button>
               <button 
                 onClick={() => {
-                  setEraserHistory([]);
-                  setErasedIndices(new Map());
-                  console.log('setOriginalColors:', typeof setOriginalColors);
-                  setOriginalColors(new Map());
+                  const noiseHistory = eraserHistory.filter(h => h.type === 'noise');
+                  setEraserHistory(noiseHistory);
+                  
+                  const newErasedIndices = new Map<number, number>();
+                  noiseHistory.forEach(stroke => {
+                    stroke.indices.forEach(idx => {
+                      newErasedIndices.set(idx, (newErasedIndices.get(idx) || 0) + 1);
+                    });
+                  });
+                  setErasedIndices(newErasedIndices);
+
                   setShowResetConfirm(false);
-                  addNotification('Eraser edits reset', 'info');
+                  addNotification('Manual eraser edits reset', 'info');
                 }}
                 className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
               >
@@ -573,13 +638,15 @@ export default function Sidebar({
       <div className="p-6 border-b border-neutral-800">
         <h1 className="text-xl font-semibold tracking-tight text-neutral-100">Splat Viewer</h1>
         <p className="text-sm text-neutral-400 mt-1">Gaussian Splatting in 3D</p>
-        <p className="text-xs text-neutral-600 mt-0.5">v0.2</p>
+        <p className="text-xs text-neutral-600 mt-0.5">v0.3</p>
       </div>
 
       <div className="p-6 space-y-8 flex-1">
         {/* Source Control */}
         <section className="space-y-4">
-          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Source</h2>
+          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider flex items-center gap-2">
+            <Layers size={16} /> Active Layer Source
+          </h2>
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-neutral-500 mb-1">URL</label>
@@ -689,7 +756,7 @@ export default function Sidebar({
             </div>
             <div className="space-y-2">
               <div className="flex justify-between">
-                <label className="text-xs text-neutral-400">Proxy distribution threshold</label>
+                <label className="text-xs text-neutral-400">Proxy color threshold</label>
                 <span className="text-xs text-neutral-500">{localProxyThreshold.toFixed(2)}</span>
               </div>
               <input 
@@ -705,6 +772,60 @@ export default function Sidebar({
                 className="w-full accent-indigo-500"
               />
             </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <label className="text-xs text-neutral-400">SOR Threshold</label>
+                <span className="text-xs text-neutral-500">{localSorThreshold.toFixed(2)}</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.1" 
+                max="5.0" 
+                step="0.1"
+                value={localSorThreshold}
+                onChange={(e) => setLocalSorThreshold(parseFloat(e.target.value))}
+                onMouseUp={() => setSorThreshold(localSorThreshold)}
+                onTouchEnd={() => setSorThreshold(localSorThreshold)}
+                onKeyUp={() => setSorThreshold(localSorThreshold)}
+                className="w-full accent-indigo-500"
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <label className="text-xs text-neutral-400">SOR Neighbors</label>
+                <span className="text-xs text-neutral-500">{localSorNeighbors}</span>
+              </div>
+              <input 
+                type="range" 
+                min="5" 
+                max="100" 
+                step="1"
+                value={localSorNeighbors}
+                onChange={(e) => setLocalSorNeighbors(parseInt(e.target.value, 10))}
+                onMouseUp={() => setSorNeighbors(localSorNeighbors)}
+                onTouchEnd={() => setSorNeighbors(localSorNeighbors)}
+                onKeyUp={() => setSorNeighbors(localSorNeighbors)}
+                className="w-full accent-indigo-500"
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <label className="text-xs text-neutral-400">Volumetric Noise %</label>
+                <span className="text-xs text-neutral-500">{localVolumetricThresholdPercent.toFixed(1)}%</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.1" 
+                max="50.0" 
+                step="0.1"
+                value={localVolumetricThresholdPercent}
+                onChange={(e) => setLocalVolumetricThresholdPercent(parseFloat(e.target.value))}
+                onMouseUp={() => setVolumetricThresholdPercent(localVolumetricThresholdPercent)}
+                onTouchEnd={() => setVolumetricThresholdPercent(localVolumetricThresholdPercent)}
+                onKeyUp={() => setVolumetricThresholdPercent(localVolumetricThresholdPercent)}
+                className="w-full accent-indigo-500"
+              />
+            </div>
           </div>
         </section>
 
@@ -712,53 +833,55 @@ export default function Sidebar({
         <section className="space-y-4">
           <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Edit Tools</h2>
           <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-300">Eraser Mode</span>
-              <button
-                onClick={() => setIsEraserMode(!isEraserMode)}
-                className={`w-10 h-5 rounded-full relative transition-colors ${isEraserMode ? 'bg-indigo-500' : 'bg-neutral-700'}`}
-              >
-                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${isEraserMode ? 'translate-x-5.5' : 'translate-x-0.5'}`} />
-              </button>
-            </div>
-
-            {isEraserMode && (
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-xs text-neutral-400">Brush Size</label>
-                  <span className="text-[10px] text-neutral-500 font-mono">{brushSize.toFixed(2)}</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.01"
-                  max="2"
-                  step="0.01"
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(parseFloat(e.target.value))}
-                  className="w-full accent-indigo-500"
-                />
-              </div>
-            )}
-
-            {isEraserMode && (
-              <div className="space-y-2">
+            <div className="space-y-2">
                 <label className="text-xs text-neutral-400">Export File Name</label>
                 <input
                   type="text"
                   value={splatExportFileName}
                   onChange={(e) => setSplatExportFileName(e.target.value)}
                   className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
-                  placeholder="cleaned_model.splat"
+                  placeholder={exportFormat === 'splat' ? "cleaned_model.splat" : "cleaned_model.ply"}
                 />
               </div>
-            )}
+
+              <div className="space-y-2">
+                <label className="text-xs text-neutral-400">Export Format</label>
+                <div className="flex bg-neutral-800 rounded p-0.5 border border-neutral-700">
+                  <button
+                    onClick={() => {
+                      setExportFormat('splat');
+                      if (splatExportFileName.toLowerCase().endsWith('.ply')) {
+                        setSplatExportFileName(splatExportFileName.replace(/\.ply$/i, '.splat'));
+                      }
+                    }}
+                    className={`flex-1 py-1 rounded text-[10px] uppercase font-medium transition-colors ${
+                      exportFormat === 'splat' ? 'bg-indigo-600 text-white' : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    Splat
+                  </button>
+                  <button
+                    onClick={() => {
+                      setExportFormat('ply');
+                      if (splatExportFileName.toLowerCase().endsWith('.splat')) {
+                        setSplatExportFileName(splatExportFileName.replace(/\.splat$/i, '.ply'));
+                      }
+                    }}
+                    className={`flex-1 py-1 rounded text-[10px] uppercase font-medium transition-colors ${
+                      exportFormat === 'ply' ? 'bg-indigo-600 text-white' : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    PLY
+                  </button>
+                </div>
+              </div>
 
             <div className="flex gap-2">
               <button
                 onClick={() => setShowResetConfirm(true)}
-                disabled={erasedIndices.size === 0}
+                disabled={!eraserHistory.some(h => h.type === 'manual')}
                 className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
-                  erasedIndices.size === 0
+                  !eraserHistory.some(h => h.type === 'manual')
                     ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                     : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
                 }`}
@@ -776,7 +899,7 @@ export default function Sidebar({
                     
                     setErasedIndices(prev => {
                       const next = new Map(prev);
-                      lastStroke.forEach(idx => {
+                      lastStroke.indices.forEach(idx => {
                         const count = next.get(idx) || 0;
                         if (count <= 1) {
                           next.delete(idx);
@@ -795,7 +918,7 @@ export default function Sidebar({
                       });
                     }
                     
-                    addNotification(`Undid ${lastStroke.length} erased splats`, 'info');
+                    addNotification(`Undid erased splats`, 'info');
                   }
                 }}
                 disabled={eraserHistory.length === 0}
@@ -809,7 +932,7 @@ export default function Sidebar({
               </button>
               
               <button
-                onClick={handleExportSplat}
+                onClick={handleExport}
                 disabled={erasedIndices.size === 0}
                 className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
                   erasedIndices.size === 0
@@ -924,6 +1047,40 @@ export default function Sidebar({
             </button>
           </div>
           <div className="space-y-3">
+            <div>
+              <div className="flex justify-between mb-1 items-center">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-neutral-500">Splat View Distance (0 = Infinite)</label>
+                  <button onClick={() => onToggleLock('splatViewDistance')} className="text-neutral-600 hover:text-neutral-400">
+                    {isLocked('splatViewDistance') ? <Lock size={10} className="text-yellow-500" /> : <Unlock size={10} className="text-green-500" />}
+                  </button>
+                  <button onClick={() => resetField('splatViewDistance', 0, setSplatViewDistance)} className="text-red-500 hover:text-red-400">
+                    <RotateCcw size={10} />
+                  </button>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  max="10000"
+                  step="10"
+                  value={splatViewDistance}
+                  onChange={(e) => !isLocked('splatViewDistance') && setSplatViewDistance(parseInt(e.target.value) || 0)}
+                  disabled={isLocked('splatViewDistance')}
+                  className={`w-16 bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-xs text-right text-neutral-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${isLocked('splatViewDistance') ? 'opacity-50 cursor-not-allowed' : ''}`}
+                />
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1000"
+                step="10"
+                value={splatViewDistance}
+                onChange={(e) => !isLocked('splatViewDistance') && setSplatViewDistance(parseInt(e.target.value))}
+                disabled={isLocked('splatViewDistance')}
+                className={`w-full accent-indigo-500 ${isLocked('splatViewDistance') ? 'opacity-50 cursor-not-allowed' : ''}`}
+              />
+            </div>
+
             <div>
               <div className="flex justify-between mb-1 items-center">
                 <div className="flex items-center gap-2">
@@ -1187,18 +1344,32 @@ export default function Sidebar({
               <label className="text-xs font-medium text-neutral-400 block">Calibration (10cm Grid)</label>
               
               {!isCalibrationMode ? (
-                <button 
-                  onClick={onStartCalibration}
-                  disabled={!isLocked('gridSize')}
-                  className={`w-full py-1.5 px-3 rounded text-xs transition-colors ${
-                    !isLocked('gridSize') 
-                      ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed' 
-                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                  }`}
-                  title={!isLocked('gridSize') ? "Lock grid size to enable calibration" : "Start Calibration"}
-                >
-                  Start Calibration
-                </button>
+                <div className="flex flex-col gap-2">
+                  <button 
+                    onClick={() => onStartCalibration('size')}
+                    disabled={!isLocked('gridSize')}
+                    className={`w-full py-1.5 px-3 rounded text-xs transition-colors ${
+                      !isLocked('gridSize') 
+                        ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed' 
+                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                    }`}
+                    title={!isLocked('gridSize') ? "Lock grid size to enable calibration" : "Start Size Calibration"}
+                  >
+                    Start Size Calibration
+                  </button>
+                  <button 
+                    onClick={() => onStartCalibration('vertical_marker')}
+                    disabled={!isLocked('gridSize')}
+                    className={`w-full py-1.5 px-3 rounded text-xs transition-colors ${
+                      !isLocked('gridSize') 
+                        ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed' 
+                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                    }`}
+                    title={!isLocked('gridSize') ? "Lock grid size to enable calibration" : "Start Vertical Marker Calibration"}
+                  >
+                    Start Vertical Marker Calibration
+                  </button>
+                </div>
               ) : (
                 <div className="space-y-2">
                   <div className="text-xs text-neutral-300">
