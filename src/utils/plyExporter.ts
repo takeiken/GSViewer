@@ -8,10 +8,18 @@ export async function exportToPly(
   centerData: Float32Array,
   colorData: any,
   selectedIndices?: Set<number>,
-  erasedIndices?: Map<number, number>
+  erasedIndices?: Map<number, number>,
+  translation?: [number, number, number],
+  rotationEuler?: [number, number, number]
 ): Promise<Blob> {
   const numSplats = centerData.length / 4;
   
+  const hasTransform = (translation && (translation[0] !== 0 || translation[1] !== 0 || translation[2] !== 0)) || 
+                       (rotationEuler && (rotationEuler[0] !== 0 || rotationEuler[1] !== 0 || rotationEuler[2] !== 0));
+
+  const tVec = translation ? new THREE.Vector3(...translation) : null;
+  const rQuat = rotationEuler ? new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotationEuler)) : null;
+
   // Ensure we have a Uint32Array view of the color data
   // We use the byteOffset and byteLength to handle cases where the buffer is shared
   const colorDataUint32 = colorData instanceof Uint32Array 
@@ -76,9 +84,22 @@ end_header
     const splatIdx = validIndices[idx];
     
     // Position
-    view.setFloat32(offset, centerData[splatIdx * 4 + 0], true);
-    view.setFloat32(offset + 4, centerData[splatIdx * 4 + 1], true);
-    view.setFloat32(offset + 8, centerData[splatIdx * 4 + 2], true);
+    let px = centerData[splatIdx * 4 + 0];
+    let py = centerData[splatIdx * 4 + 1];
+    let pz = centerData[splatIdx * 4 + 2];
+
+    if (hasTransform) {
+      const p = new THREE.Vector3(px, py, pz);
+      if (rQuat) p.applyQuaternion(rQuat);
+      if (tVec) p.add(tVec);
+      px = p.x;
+      py = p.y;
+      pz = p.z;
+    }
+
+    view.setFloat32(offset, px, true);
+    view.setFloat32(offset + 4, py, true);
+    view.setFloat32(offset + 8, pz, true);
     
     // Normals (Placeholder 0s)
     view.setFloat32(offset + 12, 0, true);
@@ -114,10 +135,24 @@ end_header
     view.setFloat32(offset + 48, finalLogScale, true);
 
     // Rotation
-    view.setFloat32(offset + 52, 1, true); // rot_0 (w)
-    view.setFloat32(offset + 56, 0, true); // rot_1 (x)
-    view.setFloat32(offset + 60, 0, true); // rot_2 (y)
-    view.setFloat32(offset + 64, 0, true); // rot_3 (z)
+    let qw = 1;
+    let qx = 0;
+    let qy = 0;
+    let qz = 0;
+
+    if (hasTransform && rQuat) {
+      const q = new THREE.Quaternion(qx, qy, qz, qw);
+      q.premultiply(rQuat);
+      qw = q.w;
+      qx = q.x;
+      qy = q.y;
+      qz = q.z;
+    }
+
+    view.setFloat32(offset + 52, qw, true); // rot_0 (w)
+    view.setFloat32(offset + 56, qx, true); // rot_1 (x)
+    view.setFloat32(offset + 60, qy, true); // rot_2 (y)
+    view.setFloat32(offset + 64, qz, true); // rot_3 (z)
 
     if (idx === 0) {
       console.log('Sample Splat Data:', {

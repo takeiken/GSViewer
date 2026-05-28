@@ -259,11 +259,10 @@ type ViewerProps = {
   setOriginalColors?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   connectedPinIds?: string[];
   connectionLineColor?: string;
-  onExemplarExported?: (blob: Blob) => void;
 };
 
 export interface ViewerHandle {
-  exportExemplar: () => Promise<void>;
+  exportCleanedPly: () => Promise<Blob | null>;
 }
 
 function Pin({ 
@@ -474,31 +473,11 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
   setOriginalColors,
   connectedPinIds,
   connectionLineColor,
-  isCtrlPressed,
-  onExemplarExported
+  isCtrlPressed
 }, ref) => {
   const groupRef = useRef<THREE.Group>(null);
 
   useImperativeHandle(ref, () => ({
-    exportExemplar: async () => {
-      const splatMesh = groupRef.current?.children[0] as any;
-      if (!splatMesh || !splatMesh.material || !splatMesh.material.uniforms) {
-        console.error("No active splat found for export");
-        return;
-      }
-      
-      const centerAndScaleTexture = splatMesh.material.uniforms.centerAndScaleTexture?.value;
-      const covAndColorTexture = splatMesh.material.uniforms.covAndColorTexture?.value;
-      if (!centerAndScaleTexture || !covAndColorTexture) return;
-
-      const centerData = centerAndScaleTexture.image.data;
-      const colorData = covAndColorTexture.image.data;
-
-      const blob = await exportToPly(centerData, colorData, selectedIndices, erasedIndices);
-      if (onExemplarExported) {
-        onExemplarExported(blob);
-      }
-    },
     exportCleanedPly: async () => {
       const splatMesh = groupRef.current?.children[0] as any;
       if (!splatMesh || !splatMesh.material || !splatMesh.material.uniforms) {
@@ -513,7 +492,7 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
       const centerData = centerAndScaleTexture.image.data;
       const colorData = covAndColorTexture.image.data;
 
-      return await exportToPly(centerData, colorData, undefined, erasedIndices);
+      return await exportToPly(centerData, colorData, undefined, erasedIndices, splatPosition, rotation);
     }
   }));
 
@@ -543,6 +522,92 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
   const prevPointsLength = useRef(points.length);
 
   const { camera, raycaster, gl, scene } = useThree();
+
+  const [isPovRotating, setIsPovRotating] = useState(false);
+  const povStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.button === 0 && (e.ctrlKey || isCtrlPressed) && !isShiftPressed && !selectionMode) {
+        setIsPovRotating(true);
+        povStartRef.current = { x: e.clientX, y: e.clientY };
+        canvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!isPovRotating || !povStartRef.current || !controlsRef.current) return;
+
+      const deltaX = e.clientX - povStartRef.current.x;
+      const deltaY = e.clientY - povStartRef.current.y;
+      
+      povStartRef.current = { x: e.clientX, y: e.clientY };
+
+      const sensitivity = 0.003;
+      const yawAngle = -deltaX * sensitivity;
+      const pitchAngle = -deltaY * sensitivity;
+
+      const target = controlsRef.current.target.clone();
+      const offset = target.clone().sub(camera.position);
+
+      const len = offset.length();
+
+      offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawAngle);
+
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      
+      const up = new THREE.Vector3(0, 1, 0);
+      const testOffset = offset.clone().applyAxisAngle(right, pitchAngle);
+      const angle = testOffset.angleTo(up);
+
+      if (angle > 0.05 && angle < Math.PI - 0.05) {
+        offset.copy(testOffset);
+      }
+
+      offset.setLength(len);
+
+      const newTarget = camera.position.clone().add(offset);
+      controlsRef.current.target.copy(newTarget);
+      
+      camera.lookAt(newTarget);
+      controlsRef.current.update();
+
+      if (renderQuality === 'efficacy') {
+        setIsMoving(true);
+        if (moveTimeoutRef.current) clearTimeout(moveTimeoutRef.current);
+        moveTimeoutRef.current = window.setTimeout(() => setIsMoving(false), 100);
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const handlePointerUp = (e: PointerEvent) => {
+      if (isPovRotating) {
+        setIsPovRotating(false);
+        povStartRef.current = null;
+        try {
+          canvas.releasePointerCapture(e.pointerId);
+        } catch (err) {}
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    canvas.addEventListener('pointerdown', handlePointerDown, { capture: true });
+    canvas.addEventListener('pointermove', handlePointerMove, { capture: true });
+    canvas.addEventListener('pointerup', handlePointerUp, { capture: true });
+
+    return () => {
+      canvas.removeEventListener('pointerdown', handlePointerDown, { capture: true });
+      canvas.removeEventListener('pointermove', handlePointerMove, { capture: true });
+      canvas.removeEventListener('pointerup', handlePointerUp, { capture: true });
+    };
+  }, [gl, camera, isPovRotating, isShiftPressed, isCtrlPressed, selectionMode, renderQuality]);
 
   // Show dropdown when a new pin is added
   useEffect(() => {
@@ -1780,7 +1845,7 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
       <OrbitControls 
         makeDefault 
         ref={controlsRef} 
-        enabled={!isShiftPressed && (!selectionMode || isCtrlPressed)} 
+        enabled={!isShiftPressed && (!selectionMode || isCtrlPressed) && !isPovRotating} 
         enableDamping={false}
         onChange={() => {
           if (renderQuality === 'efficacy') {
@@ -2030,14 +2095,9 @@ export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
   const viewerSceneRef = useRef<ViewerHandle>(null);
 
   useImperativeHandle(ref, () => ({
-    exportExemplar: async () => {
-      if (viewerSceneRef.current) {
-        await viewerSceneRef.current.exportExemplar();
-      }
-    },
     exportCleanedPly: async () => {
       if (viewerSceneRef.current) {
-        return await (viewerSceneRef.current as any).exportCleanedPly();
+        return await viewerSceneRef.current.exportCleanedPly();
       }
       return null;
     }
@@ -2089,6 +2149,7 @@ export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
               <div>Right Click: Pan</div>
               <div>Scroll: Zoom</div>
               <div>Shift + Click: Add Pin</div>
+              <div>Ctrl + Left Click + Drag: POV Rotate</div>
             </>
           )}
         </div>

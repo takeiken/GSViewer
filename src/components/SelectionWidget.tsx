@@ -11,7 +11,6 @@ interface SelectionWidgetProps {
   onEraseSelected: () => void;
   onInvertSelection: () => void;
   onClearSelection: () => void;
-  onAutoTile: () => void;
   hasSelection: boolean;
   isProcessing?: boolean;
 }
@@ -26,7 +25,6 @@ export default function SelectionWidget({
   onEraseSelected,
   onInvertSelection,
   onClearSelection,
-  onAutoTile,
   hasSelection,
   isProcessing = false
 }: SelectionWidgetProps) {
@@ -139,21 +137,6 @@ export default function SelectionWidget({
               <Eraser size={12} /> Erase
             </button>
           </div>
-
-          <div className="w-px h-6 bg-neutral-700"></div>
-
-          {/* Feature: Auto Tile */}
-          <button
-            onClick={() => onAutoTile()}
-            disabled={isProcessing}
-            className={`py-1.5 px-4 rounded text-xs transition-all flex items-center justify-center gap-2 font-medium ${
-              isProcessing 
-                ? 'bg-indigo-900/50 text-indigo-300 cursor-wait' 
-                : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] hover:shadow-[0_0_20px_rgba(79,70,229,0.6)]'
-            }`}
-          >
-            {isProcessing ? 'Processing...' : 'Auto Tile'}
-          </button>
         </div>
       </div>
 

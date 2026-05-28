@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import type { Point, SplatSource, PinFilter, PinCategory, EraserStroke, LayerData } from '../App';
-import { Trash2, Plus, Upload, Pencil, Lock, Unlock, RotateCcw, Download, FileDown, FileUp, AlertTriangle, Filter, X, Eye, EyeOff, Layers } from 'lucide-react';
+import { Trash2, Plus, Upload, Pencil, Lock, Unlock, RotateCcw, Download, FileDown, FileUp, AlertTriangle, Filter, X, Eye, EyeOff, Layers, HelpCircle } from 'lucide-react';
 import * as spz from 'spz-js';
 import { convertToSplat } from '../utils/splatConverter';
-import { splatToPly } from '../utils/splatToPly';
+import { splatToPly, transformSplatBuffer } from '../utils/splatToPly';
 import { NotificationType } from './Notification';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -100,6 +100,9 @@ type SidebarProps = {
   exportFormat: 'splat' | 'ply';
   setExportFormat: (format: 'splat' | 'ply') => void;
   onExportPly: (filename: string) => Promise<void>;
+  onShowProxyHelp: () => void;
+  onShowEditToolsHelp: () => void;
+  onShowSettingsHelp: () => void;
 };
 
 const BufferedInput = ({ 
@@ -236,6 +239,9 @@ export default function Sidebar({
   exportFormat,
   setExportFormat,
   onExportPly,
+  onShowProxyHelp,
+  onShowEditToolsHelp,
+  onShowSettingsHelp,
 }: SidebarProps) {
   const [inputUrl, setInputUrl] = useState(splatUrl);
   const [editingNameId, setEditingNameId] = useState<string | null>(null);
@@ -372,7 +378,7 @@ export default function Sidebar({
         type: splatSource.type,
         value: splatSource.value
       },
-      transform: { scale, pointSize, threshold, position: splatPosition, rotation, splatViewDistance },
+      transform: { scale, pointSize, threshold, splatViewDistance },
       grid: { size: gridSize, divisions: gridDivisions, viewDistance, thickness: gridThickness },
       navigation: { moveSpeed },
       pins: points.map(p => ({
@@ -503,7 +509,8 @@ export default function Sidebar({
       
       // Fetch the internal splat buffer (all loaded files are converted to .splat internally)
       const response = await fetch(splatUrl);
-      const buffer = await response.arrayBuffer();
+      const rawBuffer = await response.arrayBuffer();
+      const buffer = transformSplatBuffer(rawBuffer, splatPosition, rotation);
       
       let blob: Blob;
       let finalName = splatExportFileName.trim();
@@ -566,25 +573,25 @@ export default function Sidebar({
   return (
     <aside className="w-80 bg-neutral-950 border-r border-neutral-800 flex flex-col overflow-y-auto relative">
       {showImportConfirm && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 shadow-xl max-w-xs w-full">
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto">
+          <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-5 shadow-2xl max-w-xs w-full animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center gap-2 text-amber-500 mb-2">
               <AlertTriangle size={20} />
               <h3 className="font-semibold text-neutral-200">Confirm Import</h3>
             </div>
-            <p className="text-sm text-neutral-400 mb-4">
+            <p className="text-sm text-neutral-400 mb-4 font-sans leading-relaxed">
               Importing settings will override all current settings and unlock all fields. This action cannot be undone.
             </p>
             <div className="flex justify-end gap-2">
               <button 
                 onClick={() => setShowImportConfirm(false)}
-                className="px-3 py-1.5 text-xs font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors"
+                className="px-3 py-1.5 text-xs font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button 
                 onClick={confirmImport}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded transition-colors"
+                className="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded transition-colors cursor-pointer"
               >
                 Confirm Import
               </button>
@@ -594,19 +601,19 @@ export default function Sidebar({
       )}
 
       {showResetConfirm && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 shadow-xl max-w-xs w-full">
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto">
+          <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-5 shadow-2xl max-w-xs w-full animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center gap-2 text-amber-500 mb-2">
               <AlertTriangle size={20} />
               <h3 className="font-semibold text-neutral-200">Confirm Reset</h3>
             </div>
-            <p className="text-sm text-neutral-400 mb-4">
+            <p className="text-sm text-neutral-400 mb-4 font-sans leading-relaxed">
               Resetting will discard all your eraser edits. This action cannot be undone.
             </p>
             <div className="flex justify-end gap-2">
               <button 
                 onClick={() => setShowResetConfirm(false)}
-                className="px-3 py-1.5 text-xs font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors"
+                className="px-3 py-1.5 text-xs font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -626,7 +633,7 @@ export default function Sidebar({
                   setShowResetConfirm(false);
                   addNotification('Manual eraser edits reset', 'info');
                 }}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
+                className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors cursor-pointer"
               >
                 Reset Splat
               </button>
@@ -638,7 +645,7 @@ export default function Sidebar({
       <div className="p-6 border-b border-neutral-800">
         <h1 className="text-xl font-semibold tracking-tight text-neutral-100">Splat Viewer</h1>
         <p className="text-sm text-neutral-400 mt-1">Gaussian Splatting in 3D</p>
-        <p className="text-xs text-neutral-600 mt-0.5">v0.3</p>
+        <p className="text-xs text-neutral-600 mt-0.5">v0.4</p>
       </div>
 
       <div className="p-6 space-y-8 flex-1">
@@ -727,7 +734,16 @@ export default function Sidebar({
 
         {/* Splat Proxy */}
         <section className="space-y-4">
-          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Splat Proxy</h2>
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Splat Proxy</h2>
+            <button
+              onClick={onShowProxyHelp}
+              className="text-neutral-400 hover:text-indigo-400 p-0.5 rounded transition-colors"
+              title="What is Splat Proxy & Sliders?"
+            >
+              <HelpCircle size={14} />
+            </button>
+          </div>
           <div className="space-y-3">
             <div className="flex gap-2">
               <button 
@@ -831,7 +847,16 @@ export default function Sidebar({
 
         {/* Edit Tools */}
         <section className="space-y-4">
-          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Edit Tools</h2>
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Edit Tools</h2>
+            <button
+              onClick={onShowEditToolsHelp}
+              className="text-neutral-400 hover:text-indigo-400 p-0.5 rounded transition-colors"
+              title="What are Edit Tools?"
+            >
+              <HelpCircle size={14} />
+            </button>
+          </div>
           <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-3">
             <div className="space-y-2">
                 <label className="text-xs text-neutral-400">Export File Name</label>
@@ -933,12 +958,7 @@ export default function Sidebar({
               
               <button
                 onClick={handleExport}
-                disabled={erasedIndices.size === 0}
-                className={`flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 ${
-                  erasedIndices.size === 0
-                    ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                }`}
+                className="flex-1 py-1.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer"
               >
                 <Download size={12} /> Export
               </button>
@@ -948,7 +968,16 @@ export default function Sidebar({
 
         {/* Export/Import Setting */}
         <section className="space-y-4">
-          <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Settings</h2>
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-sm font-medium text-neutral-300 uppercase tracking-wider">Settings</h2>
+            <button
+              onClick={onShowSettingsHelp}
+              className="text-neutral-400 hover:text-indigo-400 p-0.5 rounded transition-colors"
+              title="What is saved in Settings?"
+            >
+              <HelpCircle size={14} />
+            </button>
+          </div>
           <div className="space-y-2">
             <div>
               <label className="block text-xs text-neutral-500 mb-1">Export Filename (Optional)</label>

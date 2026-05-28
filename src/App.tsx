@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
+import { HelpCircle, X } from 'lucide-react';
 import Viewer, { ViewerHandle } from './components/Viewer';
 import Sidebar from './components/Sidebar';
 import NotificationContainer, { NotificationItem, NotificationType } from './components/Notification';
@@ -67,7 +68,6 @@ export type WGS84Calibration = {
 
 export default function App() {
   const viewerRef = useRef<ViewerHandle>(null);
-  const [isTiling, setIsTiling] = useState(false);
   
   const [layers, setLayers] = useState<LayerData[]>([{
     id: uuidv4(),
@@ -162,6 +162,9 @@ export default function App() {
   const [volumetricThresholdPercent, setVolumetricThresholdPercent] = useState(10.0);
   const [splatExportFileName, setSplatExportFileName] = useState('cleaned_model.splat');
   const [exportFormat, setExportFormat] = useState<'splat' | 'ply'>('splat');
+  const [showProxyHelp, setShowProxyHelp] = useState(false);
+  const [showEditToolsHelp, setShowEditToolsHelp] = useState(false);
+  const [showSettingsHelp, setShowSettingsHelp] = useState(false);
 
   // Selection State
   const [selectionMode, setSelectionMode] = useState<'rect' | 'lasso' | 'polygon' | 'brush' | null>(null);
@@ -481,8 +484,6 @@ export default function App() {
       if (settings.transform?.scale !== undefined) setScale(settings.transform.scale);
       if (settings.transform?.pointSize !== undefined) setPointSize(settings.transform.pointSize);
       if (settings.transform?.threshold !== undefined) setThreshold(settings.transform.threshold);
-      if (settings.transform?.position) setSplatPosition(settings.transform.position);
-      if (settings.transform?.rotation) setRotation(settings.transform.rotation);
       if (settings.grid?.size !== undefined) setGridSize(settings.grid.size);
       if (settings.grid?.divisions !== undefined) setGridDivisions(settings.grid.divisions);
       if (settings.grid?.thickness !== undefined) setGridThickness(settings.grid.thickness);
@@ -545,67 +546,6 @@ export default function App() {
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [selectionMode, activeLayerId, addNotification]);
-
-  const handleExemplarExported = async (blob: Blob) => {
-    setIsTiling(true);
-    addNotification('Uploading exemplar and processing auto-tiling...', 'info');
-
-    try {
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onload = () => {
-          const res = reader.result as string;
-          resolve(res.split(',')[1]); // get base64 part
-        };
-        reader.readAsDataURL(blob);
-      });
-
-      const base64Data = await base64Promise;
-
-      addNotification('Running Step 1 (exemplar_to_tile.py)...', 'info');
-      const response1 = await fetch('/api/auto-tile-step1', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ exemplarPlyData: base64Data }),
-      });
-
-      if (!response1.ok) {
-        const err = await response1.json();
-        throw new Error(err.error || 'Auto-tiling Step 1 failed');
-      }
-
-      const result1 = await response1.json();
-      addNotification(result1.message, 'success');
-
-      addNotification('Running Step 2 (transform_splat_tile.py)...', 'info');
-      const response2 = await fetch('/api/auto-tile-step2', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!response2.ok) {
-        const err = await response2.json();
-        throw new Error(err.error || 'Auto-tiling Step 2 failed');
-      }
-
-      const result2 = await response2.json();
-      addNotification(result2.message, 'success');
-
-      // Trigger download
-      window.location.href = result2.downloadUrl;
-    } catch (error) {
-      console.error(error);
-      addNotification(`Auto-tiling error: ${(error as Error).message}`, 'error');
-    } finally {
-      setIsTiling(false);
-    }
-  };
-
-  const handleAutoTile = () => {
-    if (viewerRef.current) {
-      viewerRef.current.exportExemplar();
-    }
-  };
 
   const handleExportCleanedPly = async (filename: string) => {
     if (!viewerRef.current) return;
@@ -722,6 +662,9 @@ export default function App() {
         exportFormat={exportFormat}
         setExportFormat={setExportFormat}
         onExportPly={handleExportCleanedPly}
+        onShowProxyHelp={() => setShowProxyHelp(true)}
+        onShowEditToolsHelp={() => setShowEditToolsHelp(true)}
+        onShowSettingsHelp={() => setShowSettingsHelp(true)}
       />
       <main className="flex-1 relative">
         <div id="svg-overlay" className="absolute top-0 left-0 w-full h-full pointer-events-none z-50"></div>
@@ -781,7 +724,6 @@ export default function App() {
           setOriginalColors={setOriginalColors}
           connectedPinIds={connectedPinIds}
           connectionLineColor={connectionLineColor}
-          onExemplarExported={handleExemplarExported}
         />
         <WidgetPanel
           points={points}
@@ -811,8 +753,6 @@ export default function App() {
           brushSize={brushSize}
           setBrushSize={setBrushSize}
           hasSelection={selectedIndices.size > 0}
-          isProcessing={isTiling}
-          onAutoTile={handleAutoTile}
           onEraseSelected={() => {
             if (selectedIndices.size === 0) return;
             // Record eraser history
@@ -842,6 +782,352 @@ export default function App() {
         />
         <NotificationContainer notifications={notifications} removeNotification={removeNotification} />
       </main>
+
+      {showProxyHelp && (
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto relative animate-in fade-in zoom-in-95 duration-200">
+            {/* Close Button */}
+            <button
+              onClick={() => setShowProxyHelp(false)}
+              className="absolute top-4 right-4 text-neutral-400 hover:text-neutral-200 p-1.5 rounded-lg hover:bg-neutral-800 transition-colors"
+              title="Close Guide"
+            >
+              <X size={16} />
+            </button>
+
+            {/* Title */}
+            <div className="flex items-center gap-2 text-indigo-400 mb-6 pb-4 border-b border-neutral-800">
+              <HelpCircle size={24} />
+              <h3 className="font-semibold text-lg text-neutral-100 font-sans">Splat Proxy Sliders Explained</h3>
+            </div>
+
+            {/* Explanation Content */}
+            <div className="space-y-6 text-sm text-neutral-300 leading-relaxed">
+              <p className="text-neutral-400 font-sans">
+                The Splat Proxy filters let you dynamically analyze 3D Gaussian distributions to isolate and remove background noise, floaters, and reconstruction artifacts.
+              </p>
+
+              {/* Slider 1 */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60 font-sans">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Proxy Grid Scale / Color Threshold
+                </h4>
+                <div className="space-y-2 mt-2">
+                  <div>
+                    <span className="text-neutral-400 font-medium font-sans">What it does: </span>
+                    Defines the local neighborhood density search grid cell dimension.
+                  </div>
+                  <div>
+                    <span className="text-neutral-400 font-medium font-sans">How it works: </span>
+                    Splat points are binned into a spatial hash grid using the threshold value as the voxel size. Low-density grid blocks containing sparse points are classified as outlier candidates.
+                  </div>
+                  <div className="bg-neutral-950 p-2.5 rounded font-mono text-xs text-indigo-400 border border-neutral-900">
+                    <span className="text-neutral-500 font-semibold uppercase text-[10px] block mb-1">Grid/Voxel Size:</span>
+                    Voxel Dimension = Slider Value (meters)
+                    <span className="block mt-1 text-neutral-500">Outliers defined as points in voxels with count &le; 2</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Slider 2 */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60 font-sans">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  SOR Threshold (Std Dev)
+                </h4>
+                <div className="space-y-2 mt-2">
+                  <div>
+                    <span className="text-neutral-400 font-medium font-sans">What it does: </span>
+                    Specifies the strictness threshold of Statistical Outlier Removal.
+                  </div>
+                  <div>
+                    <span className="text-neutral-400 font-medium font-sans">How it works: </span>
+                    Computes the average distance to neighboring points. Points with neighbor distances exceeding the global average by more than a set standard deviation multiple are flagged as noise.
+                  </div>
+                  <div className="bg-neutral-950 p-2.5 rounded font-mono text-xs text-indigo-400 border border-neutral-900">
+                    <span className="text-neutral-500 font-semibold uppercase text-[10px] block mb-1">Mathematical Formula:</span>
+                    d_i &gt; &mu; + &alpha; &times; &sigma;
+                    <span className="block mt-1 text-neutral-500">
+                      where d_i = avg distance to k-neighbors, &mu; = global mean distance, &sigma; = global standard deviation, and &alpha; = SOR threshold slider value.
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Slider 3 */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60 font-sans">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  SOR Neighbors
+                </h4>
+                <div className="space-y-2 mt-2 font-sans">
+                  <div>
+                    <span className="text-neutral-400 font-medium">What it does: </span>
+                    Sets the local sample resolution neighborhood parameter for distance analysis.
+                  </div>
+                  <div>
+                    <span className="text-neutral-400 font-medium">How it works: </span>
+                    Determines how many k-nearest neighbors to query and average for each point in the dataset when performing distance evaluation.
+                  </div>
+                  <div className="bg-neutral-950 p-2.5 rounded font-mono text-xs text-indigo-400 border border-neutral-900">
+                    <span className="text-neutral-500 font-semibold uppercase text-[10px] block mb-1 font-sans">Parameter:</span>
+                    Neighbor Sample Count (k) = Slider Value
+                    <span className="block mt-1 text-neutral-500 font-sans">Lower values capture isolated points; higher values capture cloud anomalies.</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Slider 4 */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60 font-sans">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Volumetric Noise %
+                </h4>
+                <div className="space-y-2 mt-2 font-sans">
+                  <div>
+                    <span className="text-neutral-400 font-medium">What it does: </span>
+                    Filters out big, loose, and low-density "cloud floaters" by their volumetric opacity.
+                  </div>
+                  <div>
+                    <span className="text-neutral-400 font-medium">How it works: </span>
+                    Estimates the physical volume of each Gaussian splat ellipsoidal region, then computes an opacity-to-volume ratio score. Low-ranking splats in the bottom percentile are flagged.
+                  </div>
+                  <div className="bg-neutral-950 p-2.5 rounded font-mono text-xs text-indigo-400 border border-neutral-900">
+                    <span className="text-neutral-500 font-semibold uppercase text-[10px] block mb-1">Mathematical Formula:</span>
+                    Volume = &radic;Max(0, Det(&Sigma;))
+                    <span className="block text-indigo-400">Score = Opacity / (Volume + 10⁻¹⁰)</span>
+                    <span className="block mt-1 text-neutral-500">
+                      where &Sigma; = covariance matrix. Bottom &beta;% (slider value) of splats with lowest scores are removed.
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Close Actions */}
+            <div className="mt-6 pt-4 border-t border-neutral-800 flex justify-end">
+              <button
+                onClick={() => setShowProxyHelp(false)}
+                className="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 px-4 py-2 rounded-md text-sm transition-colors cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEditToolsHelp && (
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto relative animate-in fade-in zoom-in-95 duration-200">
+            {/* Close Button */}
+            <button
+              onClick={() => setShowEditToolsHelp(false)}
+              className="absolute top-4 right-4 text-neutral-400 hover:text-neutral-200 p-1.5 rounded-lg hover:bg-neutral-800 transition-colors"
+              title="Close Guide"
+            >
+              <X size={16} />
+            </button>
+
+            {/* Title */}
+            <div className="flex items-center gap-2 text-indigo-400 mb-6 pb-4 border-b border-neutral-800">
+              <HelpCircle size={24} />
+              <h3 className="font-semibold text-lg text-neutral-100 font-sans">Edit & Export Tools Guide</h3>
+            </div>
+
+            {/* Explanation Content */}
+            <div className="space-y-6 text-sm text-neutral-300 leading-relaxed font-sans">
+              <p className="text-neutral-400">
+                The layout lets you refine 3D Gaussian Splats surgically, and export your polished results to either <span className="text-neutral-200 font-semibold">.splat</span> or <span className="text-neutral-200 font-semibold">.ply</span> file types.
+              </p>
+
+              {/* Key Features */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-indigo-300 mb-2 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Export Formats Supported
+                </h4>
+                <ul className="list-disc pl-5 space-y-2 mt-1 text-neutral-300">
+                  <li>
+                    <span className="text-neutral-400 font-medium">Standard (.splat): </span>
+                    Perfect for WebGL renderers and standard viewers. Saves your modified scene with position offsets and rotations applied directly to the internal buffer.
+                  </li>
+                  <li>
+                    <span className="text-neutral-400 font-medium">Stanford PLY (.ply): </span>
+                    Perfect for pipeline tools and software (e.g. Polycam, Luma, Blender, Unity plugins). Transcribes spatial transformation alignments, transparency, spherical harmonics, covariances, and scale dimensions.
+                  </li>
+                </ul>
+              </div>
+
+              {/* Transformations Included */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Active Transformations Preserved
+                </h4>
+                <div className="space-y-2 mt-2">
+                  <p className="text-neutral-400">
+                    Unlike ordinary viewers, any edits and spatial changes you make in the viewport are baked directly into your exported file:
+                  </p>
+                  <div className="bg-neutral-950 p-3 rounded font-mono text-xs text-indigo-400 border border-neutral-900 grid grid-cols-2 gap-x-4 gap-y-2">
+                    <div>
+                      <span className="text-neutral-500 font-semibold uppercase text-[10px] block">Spatial Translation:</span>
+                      X, Y, Z Position (Offsets)
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 font-semibold uppercase text-[10px] block">Spatial Rotation:</span>
+                      Yaw, Pitch, Roll (Euler/Quat)
+                    </div>
+                    <div className="col-span-2 border-t border-neutral-900 pt-2 mt-1">
+                      <span className="text-neutral-500 font-semibold uppercase text-[10px] block">Eraser & Selection Bounds:</span>
+                      Manual brush strokes and volume/lasso crops are fully omitted from the exported point cloud.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Selection Modes */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-indigo-300 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Refinement Modes
+                </h4>
+                <div className="space-y-2 mt-2 text-neutral-400">
+                  <p>
+                    Use the bottom bar tool selectors to crop chunks cleanly:
+                  </p>
+                  <ul className="list-disc pl-5 space-y-1 text-neutral-300">
+                    <li><span className="font-semibold text-neutral-200">Brush:</span> Paint directly in 3D perspective space to paint selection outlines.</li>
+                    <li><span className="font-semibold text-neutral-200">Lasso / Polygon / Rectangle:</span> Trap background scatter inside a 2D lasso region.</li>
+                    <li><span className="font-semibold text-neutral-200">Invert/Clear Selection:</span> Rapidly alternate focus to carve out complex structures.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Close Actions */}
+            <div className="mt-6 pt-4 border-t border-neutral-800 flex justify-end">
+              <button
+                onClick={() => setShowEditToolsHelp(false)}
+                className="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 px-4 py-2 rounded-md text-sm transition-colors cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSettingsHelp && (
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto relative animate-in fade-in zoom-in-95 duration-200">
+            {/* Close Button */}
+            <button
+              onClick={() => setShowSettingsHelp(false)}
+              className="absolute top-4 right-4 text-neutral-400 hover:text-neutral-200 p-1.5 rounded-lg hover:bg-neutral-800 transition-colors"
+              title="Close Guide"
+            >
+              <X size={16} />
+            </button>
+
+            {/* Title */}
+            <div className="flex items-center gap-2 text-indigo-400 mb-6 pb-4 border-b border-neutral-800">
+              <HelpCircle size={24} />
+              <h3 className="font-semibold text-lg text-neutral-100 font-sans">Settings Import/Export Explained</h3>
+            </div>
+
+            {/* Explanation Content */}
+            <div className="space-y-6 text-sm text-neutral-300 leading-relaxed font-sans">
+              <p className="text-neutral-400">
+                You can save and restore your entire session layout, calibration configurations, and scene settings into highly serialized <span className="text-neutral-200 font-semibold">JSON settings files</span>.
+              </p>
+
+              {/* What is recorded */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-emerald-400 mb-2 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                  What Parameters Are Exported & Saved:
+                </h4>
+                <div className="grid grid-cols-2 gap-3 text-xs mt-1">
+                  <div className="border-r border-neutral-800 pr-2">
+                    <span className="font-semibold text-neutral-300 block mb-1">Visual Transformations</span>
+                    <ul className="list-disc pl-4 space-y-1 text-neutral-400">
+                      <li>Model Scale & pointSize multiplier</li>
+                      <li>Rendering Threshold filter values</li>
+                      <li>Viewer camera step navigation distance</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <span className="font-semibold text-neutral-300 block mb-1">Grid & Guides</span>
+                    <ul className="list-disc pl-4 space-y-1 text-neutral-400">
+                      <li>Voxel helper grid boundaries limit</li>
+                      <li>Grid thickness rendering options</li>
+                      <li>Divisions and relative distances parameters</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              {/* What is read */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-indigo-300 mb-2 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  Calibration & Pin Telemetry Schema:
+                </h4>
+                <div className="space-y-2 text-xs text-neutral-400">
+                  <p>
+                    Importing settings recovers all active anchors and geospatial linkages dynamically:
+                  </p>
+                  <table className="w-full table-fixed border border-neutral-800 bg-neutral-950 text-left rounded-md overflow-hidden">
+                    <thead>
+                      <tr className="bg-neutral-900 text-neutral-300 text-[10px] uppercase font-mono border-b border-neutral-800">
+                        <th className="p-2 w-1/3">Key Category</th>
+                        <th className="p-2">Properties Map Recorded</th>
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono text-[11px] text-neutral-400">
+                      <tr className="border-b border-neutral-800/40">
+                        <td className="p-2 text-indigo-400 font-semibold">pins: []</td>
+                        <td className="p-2 text-neutral-300">Name descriptions, categories, active colors, connected linkages, physical X/Y/Z coords, geographic Lat/Lng tags</td>
+                      </tr>
+                      <tr className="border-b border-neutral-800/40">
+                        <td className="p-2 text-indigo-400 font-semibold">wgs84Calibration</td>
+                        <td className="p-2 text-neutral-300">High-precision georeferencing anchor coordinate mappings (WGS1, WGS2, elevation layers)</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2 text-indigo-400 font-semibold">source</td>
+                        <td className="p-2 text-neutral-300">Splat URL values, active file type reference catalogs</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Behavior Note */}
+              <div className="bg-neutral-950/40 p-4 rounded-lg border border-neutral-800/60">
+                <h4 className="font-medium text-amber-400 mb-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                  Safety Mechanism
+                </h4>
+                <p className="text-neutral-400 mt-1">
+                  When a settings file is read/imported, a confirmation overlay ensures existing setups are not accidentally overwritten. On approval, all calibrated metrics, visual scopes, and geographical coordinates are restored instantly.
+                </p>
+              </div>
+            </div>
+
+            {/* Footer Close Actions */}
+            <div className="mt-6 pt-4 border-t border-neutral-800 flex justify-end">
+              <button
+                onClick={() => setShowSettingsHelp(false)}
+                className="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 px-4 py-2 rounded-md text-sm transition-colors cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
