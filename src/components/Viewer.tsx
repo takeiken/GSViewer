@@ -1,9 +1,9 @@
 import { createPortal } from 'react-dom';
-import { useRef, Suspense, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
+import { useRef, Suspense, useEffect, useState, useCallback, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Html, Grid, Splat, TransformControls, KeyboardControls, useKeyboardControls, Line } from '@react-three/drei';
 import * as THREE from 'three';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Home } from 'lucide-react';
 import { exportToPly } from '../utils/plyExporter';
 import type { Point, PinCategory, EraserStroke, LayerData } from '../App';
 
@@ -259,10 +259,24 @@ type ViewerProps = {
   setOriginalColors?: React.Dispatch<React.SetStateAction<Map<number, number>>>;
   connectedPinIds?: string[];
   connectionLineColor?: string;
+  isCtrlPressed?: boolean;
+
+  // New hooks for timeline & boundaries
+  onAddEraserStroke?: (stroke: EraserStroke) => void;
+  onUndoStroke?: () => void;
+  boundaries?: any[];
+  boundariesOpacity?: number;
+  setBoundaries?: React.Dispatch<React.SetStateAction<any[]>>;
+  selectedBoundaryId?: string | null;
+  setSelectedBoundaryId?: (id: string | null) => void;
+  isPlacingBoundary?: boolean;
+  setIsPlacingBoundary?: (val: boolean) => void;
+  onAddBoundaryAtPosition?: (position: [number, number, number]) => void;
 };
 
 export interface ViewerHandle {
   exportCleanedPly: () => Promise<Blob | null>;
+  goHome: () => void;
 }
 
 function Pin({ 
@@ -473,7 +487,18 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
   setOriginalColors,
   connectedPinIds,
   connectionLineColor,
-  isCtrlPressed
+  isCtrlPressed,
+
+  onAddEraserStroke,
+  onUndoStroke,
+  boundaries = [],
+  boundariesOpacity = 0.4,
+  setBoundaries,
+  selectedBoundaryId,
+  setSelectedBoundaryId,
+  isPlacingBoundary,
+  setIsPlacingBoundary,
+  onAddBoundaryAtPosition
 }, ref) => {
   const groupRef = useRef<THREE.Group>(null);
 
@@ -493,6 +518,35 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
       const colorData = covAndColorTexture.image.data;
 
       return await exportToPly(centerData, colorData, undefined, erasedIndices, splatPosition, rotation);
+    },
+    goHome: () => {
+      let center = new THREE.Vector3(0, 0, 0);
+      let distance = 5;
+      
+      if (groupRef.current) {
+        const box = new THREE.Box3().setFromObject(groupRef.current);
+        if (isFinite(box.min.x)) {
+          box.getCenter(center);
+          const size = new THREE.Vector3();
+          box.getSize(size);
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const fovRad = (50 * Math.PI) / 180;
+          distance = (maxDim / (2 * Math.tan(fovRad / 2))) * 1.5;
+          distance = Math.max(3, Math.min(distance, 150));
+        }
+      }
+      
+      const dir = new THREE.Vector3(1, 1, 1).normalize();
+      const targetPos = center.clone().add(dir.multiplyScalar(distance));
+      
+      if (controlsRef.current) {
+        const camera = controlsRef.current.object;
+        if (camera) {
+          camera.position.copy(targetPos);
+          controlsRef.current.target.copy(center);
+          controlsRef.current.update();
+        }
+      }
     }
   }));
 
@@ -818,7 +872,9 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
           
           if (groupRef.current) {
             // Pass world coordinates directly
-            if (isCalibrationMode && onCalibrationPointClick) {
+            if (isPlacingBoundary && onAddBoundaryAtPosition) {
+               onAddBoundaryAtPosition([newPos.x, newPos.y, newPos.z]);
+            } else if (isCalibrationMode && onCalibrationPointClick) {
                onCalibrationPointClick([newPos.x, newPos.y, newPos.z]);
             } else {
                onAddPinAtPosition([newPos.x, newPos.y, newPos.z]);
@@ -1861,6 +1917,21 @@ const ViewerScene = forwardRef<ViewerHandle, ViewerProps & {
       <GizmoHelper alignment="top-right" margin={[80, 80]}>
         <GizmoViewport axisColors={['#ff3653', '#8adb00', '#2c8fff']} labelColor="white" />
       </GizmoHelper>
+
+      {/* Center Point Boundary Boxes */}
+      {boundaries && boundaries.filter((boundary: any) => boundary.visible !== false).map((boundary: any) => (
+        <BoundaryVisualizer
+          key={boundary.id}
+          boundary={boundary}
+          isSelected={selectedBoundaryId === boundary.id}
+          onSelect={() => setSelectedBoundaryId?.(boundary.id)}
+          onUpdate={(id, pos) => {
+            setBoundaries?.(prev => prev.map(b => b.id === id ? { ...b, center: pos } : b));
+          }}
+          selectionMode={selectionMode}
+          boundariesOpacity={boundariesOpacity}
+        />
+      ))}
     </>
   );
 });
@@ -2100,6 +2171,11 @@ export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
         return await viewerSceneRef.current.exportCleanedPly();
       }
       return null;
+    },
+    goHome: () => {
+      if (viewerSceneRef.current) {
+        viewerSceneRef.current.goHome();
+      }
     }
   }));
 
@@ -2127,6 +2203,20 @@ export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
           />
         </Canvas>
       </KeyboardControls>
+
+      {/* Home Button next to Navigation Gizmo */}
+      <button
+        id="navigation-home-button"
+        onClick={() => {
+          if (viewerSceneRef.current) {
+            viewerSceneRef.current.goHome();
+          }
+        }}
+        className="absolute top-[76px] right-[145px] z-50 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 p-2.5 rounded-full shadow-lg border border-neutral-700 hover:border-neutral-500 transition-all flex items-center justify-center hover:scale-105 active:scale-95 cursor-pointer pointer-events-auto shadow-indigo-950/20"
+        title="Reset Cam view to Default View Angle (45 degrees on all axes)"
+      >
+        <Home size={15} />
+      </button>
       
       {/* Overlay info */}
       <div className="absolute bottom-6 right-6 pointer-events-none">
@@ -2157,3 +2247,221 @@ export default forwardRef<ViewerHandle, ViewerProps>((props, ref) => {
     </div>
   );
 });
+
+// Helper for boundary outline coordinates and vertical corner posts (from custom sketch)
+function getBoundaryLines(center: [number, number, number], size: number, rotationDeg: number) {
+  const [cx, cy, cz] = center;
+  const s = size / 2;
+  const rad = (rotationDeg * Math.PI) / 180;
+  
+  const rotateX = (x: number, z: number) => x * Math.cos(rad) - z * Math.sin(rad);
+  const rotateZ = (x: number, z: number) => x * Math.sin(rad) + z * Math.cos(rad);
+  
+  const p1: [number, number, number] = [cx + rotateX(-s, -s), cy, cz + rotateZ(-s, -s)];
+  const p2: [number, number, number] = [cx + rotateX(s, -s), cy, cz + rotateZ(s, -s)];
+  const p3: [number, number, number] = [cx + rotateX(s, s), cy, cz + rotateZ(s, s)];
+  const p4: [number, number, number] = [cx + rotateX(-s, s), cy, cz + rotateZ(-s, s)];
+  
+  const baseLoop = [p1, p2, p3, p4, p1];
+  const diag1 = [p1, p3];
+  const diag2 = [p2, p4];
+  
+  // Height is scaled based on size, with a minimum of 1.5 meters for visual appeal
+  const h = Math.max(1.5, size * 0.4);
+  const post1 = [p1, [p1[0], p1[1] + h, p1[2]] as [number, number, number]];
+  const post2 = [p2, [p2[0], p2[1] + h, p2[2]] as [number, number, number]];
+  const post3 = [p3, [p3[0], p3[1] + h, p3[2]] as [number, number, number]];
+  const post4 = [p4, [p4[0], p4[1] + h, p4[2]] as [number, number, number]];
+  
+  return { baseLoop, diag1, diag2, posts: [post1, post2, post3, post4] };
+}
+
+function BoundaryWalls({ center, size, rotation, color, opacity }: { center: [number, number, number], size: number, rotation: number, color: string, opacity: number }) {
+  const { baseLoop } = useMemo(() => getBoundaryLines(center, size, rotation), [center, size, rotation]);
+  const h = Math.max(1.5, size * 0.4);
+  const cy = center[1];
+
+  const p1 = baseLoop[0];
+  const p2 = baseLoop[1];
+  const p3 = baseLoop[2];
+  const p4 = baseLoop[3];
+
+  const vertices = useMemo(() => {
+    const arr = new Float32Array(24 * 3);
+    const w1 = [
+      p1, p2, [p2[0], p2[1]+h, p2[2]],
+      p1, [p2[0], p2[1]+h, p2[2]], [p1[0], p1[1]+h, p1[2]]
+    ];
+    const w2 = [
+      p2, p3, [p3[0], p3[1]+h, p3[2]],
+      p2, [p3[0], p3[1]+h, p3[2]], [p2[0], p2[1]+h, p2[2]]
+    ];
+    const w3 = [
+      p3, p4, [p4[0], p4[1]+h, p4[2]],
+      p3, [p4[0], p4[1]+h, p4[2]], [p3[0], p3[1]+h, p3[2]]
+    ];
+    const w4 = [
+      p4, p1, [p1[0], p1[1]+h, p1[2]],
+      p4, [p1[0], p1[1]+h, p1[2]], [p4[0], p4[1]+h, p4[2]]
+    ];
+    const all = [...w1, ...w2, ...w3, ...w4];
+    for (let i = 0; i < 24; i++) {
+      const pt = all[i];
+      arr[i * 3] = pt[0];
+      arr[i * 3 + 1] = pt[1];
+      arr[i * 3 + 2] = pt[2];
+    }
+    return arr;
+  }, [p1, p2, p3, p4, h]);
+
+  const uniforms = useMemo(() => ({
+    uColor: { value: new THREE.Color(color) },
+    uBaseY: { value: cy },
+    uHeight: { value: h },
+    uOpacity: { value: opacity }
+  }), []);
+
+  useEffect(() => {
+    uniforms.uColor.value.set(color);
+    uniforms.uBaseY.value = cy;
+    uniforms.uHeight.value = h;
+    uniforms.uOpacity.value = opacity;
+  }, [color, cy, h, opacity, uniforms]);
+
+  return (
+    <mesh>
+      <bufferGeometry>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[vertices, 3]}
+        />
+      </bufferGeometry>
+      <shaderMaterial
+        transparent
+        depthWrite={false}
+        side={THREE.DoubleSide}
+        vertexShader={`
+          varying vec3 vPosition;
+          void main() {
+            vPosition = position;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `}
+        fragmentShader={`
+          uniform vec3 uColor;
+          uniform float uBaseY;
+          uniform float uHeight;
+          uniform float uOpacity;
+          varying vec3 vPosition;
+          void main() {
+            float relY = clamp((vPosition.y - uBaseY) / uHeight, 0.0, 1.0);
+            float alpha = (1.0 - relY) * uOpacity;
+            gl_FragColor = vec4(uColor, alpha);
+          }
+        `}
+        uniforms={uniforms}
+      />
+    </mesh>
+  );
+}
+
+// Visualizer component using Three.js lines and handles
+function BoundaryVisualizer({
+  boundary,
+  isSelected,
+  onSelect,
+  onUpdate,
+  selectionMode,
+  boundariesOpacity = 0.4
+}: {
+  boundary: any;
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdate: (id: string, center: [number, number, number]) => void;
+  selectionMode: any;
+  boundariesOpacity?: number;
+}) {
+  const isControlsVisible = isSelected && !selectionMode;
+  const { baseLoop, diag1, diag2, posts } = getBoundaryLines(boundary.center, boundary.size, boundary.rotation);
+  
+  // Custom boundary color (defaults to violet)
+  const boundaryColor = boundary.color || '#a78bfa';
+  const lineColor = boundaryColor;
+  const lineOpacity = isSelected ? 0.9 : 0.45;
+  const lineWidth = isSelected ? 2.5 : 1.5;
+
+  return (
+    <>
+      <TransformControls
+        mode="translate"
+        space="world"
+        size={0.5}
+        showX={isControlsVisible}
+        showY={isControlsVisible}
+        showZ={isControlsVisible}
+        enabled={isControlsVisible}
+        position={boundary.center}
+        onMouseUp={(e: any) => {
+          if (e.target && e.target.object) {
+            const pos = e.target.object.position;
+            onUpdate(boundary.id, [pos.x, pos.y, pos.z]);
+          }
+        }}
+      >
+        <mesh 
+          onClick={(e) => {
+            if (selectionMode) return;
+            e.stopPropagation();
+            onSelect();
+          }}
+        >
+          <sphereGeometry args={[0.07, 16, 16]} />
+          <meshStandardMaterial 
+            color={boundaryColor} 
+            emissive={boundaryColor} 
+            emissiveIntensity={isSelected ? 0.6 : 0.2} 
+          />
+          <Html position={[0, 0.16, 0]} center zIndexRange={[50, 0]} className={`${isSelected ? 'z-50' : 'z-0'}`}>
+            <div 
+              className={`text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap font-mono backdrop-blur-sm transition-all cursor-pointer select-none font-semibold shadow-md`}
+              style={{
+                backgroundColor: isSelected ? 'rgba(15, 7, 30, 0.9)' : 'rgba(23, 23, 23, 0.85)',
+                color: isSelected ? '#ffffff' : '#e5e5e5',
+                borderColor: boundaryColor,
+                transform: isSelected ? 'scale(1.05)' : 'none'
+              }}
+              onClick={(e) => {
+                if (selectionMode) return;
+                e.stopPropagation();
+                onSelect();
+              }}
+            >
+              🚩 {boundary.name}
+            </div>
+          </Html>
+        </mesh>
+      </TransformControls>
+
+      {/* Renders the bottom square outline loop on the floor */}
+      <Line points={baseLoop} color={lineColor} lineWidth={lineWidth} transparent opacity={lineOpacity} />
+
+      {/* Renders the visual diags of center placement intersection */}
+      <Line points={diag1} color={lineColor} lineWidth={lineWidth * 0.6} transparent opacity={lineOpacity * 0.4} />
+      <Line points={diag2} color={lineColor} lineWidth={lineWidth * 0.6} transparent opacity={lineOpacity * 0.4} />
+
+      {/* Renders the vertical limits at each of the 4 outer corners matching the sketch */}
+      {posts.map((post, idx) => (
+        <Line key={idx} points={post} color={lineColor} lineWidth={lineWidth * 0.8} transparent opacity={lineOpacity * 0.8} />
+      ))}
+
+      {/* Transparent gradient walls of the same color */}
+      <BoundaryWalls
+        center={boundary.center}
+        size={boundary.size}
+        rotation={boundary.rotation}
+        color={boundaryColor}
+        opacity={boundariesOpacity * (isSelected ? 1.0 : 0.5)}
+      />
+    </>
+  );
+}

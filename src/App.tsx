@@ -1,13 +1,14 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-import { HelpCircle, X } from 'lucide-react';
+import { HelpCircle, X, Box } from 'lucide-react';
 import Viewer, { ViewerHandle } from './components/Viewer';
 import Sidebar from './components/Sidebar';
 import NotificationContainer, { NotificationItem, NotificationType } from './components/Notification';
 import WidgetPanel from './components/WidgetPanel';
 import LayerWidget from './components/LayerWidget';
 import SelectionWidget from './components/SelectionWidget';
+import BoundaryBoxPanel, { Boundary } from './components/BoundaryBoxPanel';
 
 export type Point = {
   id: string;
@@ -127,6 +128,64 @@ export default function App() {
   const eraserHistory = activeLayer.eraserHistory;
   const setEraserHistory = (val: any) => updateActiveLayer({ eraserHistory: typeof val === 'function' ? val(activeLayer.eraserHistory) : val });
 
+  // Timeline State
+  const [timelineIndex, setTimelineIndex] = useState<number>(0);
+  const [isTimelineExpanded, setIsTimelineExpanded] = useState<boolean>(false);
+
+  // Custom eraser history and index manager that handles timeline clipping
+  const handleSetEraserHistory = useCallback((val: any) => {
+    const rawPrev = eraserHistory || [];
+    const nextHistoryRaw = typeof val === 'function' ? val(rawPrev) : val;
+    
+    if (nextHistoryRaw.length > rawPrev.length) {
+      // Overwrite future steps! Clip history to timelineIndex before appending new stroke
+      const addedStroke = nextHistoryRaw[nextHistoryRaw.length - 1];
+      const truncated = rawPrev.slice(0, timelineIndex);
+      const nextHistory = [...truncated, addedStroke];
+      setEraserHistory(nextHistory);
+      setTimelineIndex(nextHistory.length);
+      
+      const nextErased = new Map<number, number>();
+      nextHistory.forEach(stroke => {
+        stroke.indices.forEach(idx => {
+          nextErased.set(idx, (nextErased.get(idx) || 0) + 1);
+        });
+      });
+      setErasedIndices(nextErased);
+    } else {
+      setEraserHistory(nextHistoryRaw);
+      setTimelineIndex(nextHistoryRaw.length);
+      const nextErased = new Map<number, number>();
+      nextHistoryRaw.forEach(stroke => {
+        stroke.indices.forEach(idx => {
+          nextErased.set(idx, (nextErased.get(idx) || 0) + 1);
+        });
+      });
+      setErasedIndices(nextErased);
+    }
+  }, [eraserHistory, timelineIndex]);
+
+  // Compute effective erased indices corresponding to current timeline step
+  const effectiveErasedIndices = useMemo(() => {
+    const nextMap = new Map<number, number>();
+    const activeHistorySlice = eraserHistory.slice(0, timelineIndex);
+    activeHistorySlice.forEach(stroke => {
+      stroke.indices.forEach(idx => {
+        nextMap.set(idx, (nextMap.get(idx) || 0) + 1);
+      });
+    });
+    return nextMap;
+  }, [eraserHistory, timelineIndex]);
+
+  // Sync timelineIndex when history length changes (e.g. initial load or reset)
+  const prevHistoryLengthRef = useRef(eraserHistory.length);
+  useEffect(() => {
+    if (eraserHistory.length !== prevHistoryLengthRef.current) {
+      setTimelineIndex(eraserHistory.length);
+      prevHistoryLengthRef.current = eraserHistory.length;
+    }
+  }, [eraserHistory.length]);
+
   const originalColors = activeLayer.originalColors;
   const setOriginalColors = (val: any) => updateActiveLayer({ originalColors: typeof val === 'function' ? val(activeLayer.originalColors) : val });
   const [gridSize, setGridSize] = useState<number>(10);
@@ -151,8 +210,28 @@ export default function App() {
 
   // Calibration State
   const [isCalibrationMode, setIsCalibrationMode] = useState(false);
-  const [calibrationMethod, setCalibrationMethod] = useState<'size' | 'vertical_marker'>('size');
+  const [calibrationMethod, setCalibrationMethod] = useState<'size' | 'vertical_marker' | 'depth'>('size');
   const [calibrationPoints, setCalibrationPoints] = useState<[number, number, number][]>([]);
+
+  // Depth Calibration State
+  const [depthCalibrationRefPinId, setDepthCalibrationRefPinId] = useState<string | null>(null);
+  const [depthCalibrationRefDepthValue, setDepthCalibrationRefDepthValue] = useState<number | null>(null);
+  const [depthCalibrationRefPoint, setDepthCalibrationRefPoint] = useState<[number, number, number] | null>(null);
+
+  // Boundary Box State
+  const [boundaries, setBoundaries] = useState<Boundary[]>([]);
+  const [selectedBoundaryId, setSelectedBoundaryId] = useState<string | null>(null);
+  const [isPlacingBoundary, setIsPlacingBoundary] = useState<boolean>(false);
+  const [isBoundaryPanelExpanded, setIsBoundaryPanelExpanded] = useState<boolean>(false);
+  const [boundariesOpacity, setBoundariesOpacity] = useState<number>(0.4);
+
+  const handleSelectBoundaryFromViewport = useCallback((id: string | null) => {
+    setSelectedBoundaryId(id);
+    if (id !== null) {
+      setIsBoundaryPanelExpanded(true);
+    }
+  }, []);
+
   const [recreateProxyTrigger, setRecreateProxyTrigger] = useState(0);
   const [removeRedProxiesTrigger, setRemoveRedProxiesTrigger] = useState(0);
   const [debugProxy, setDebugProxy] = useState(false);
@@ -275,12 +354,14 @@ export default function App() {
     addNotification(`Field ${field} ${nextLocked ? 'locked' : 'unlocked'}`, 'info');
   }, [lockedFields, addNotification]);
 
-  const handleStartCalibration = (method: 'size' | 'vertical_marker') => {
+  const handleStartCalibration = (method: 'size' | 'vertical_marker' | 'depth') => {
     setIsCalibrationMode(true);
     setCalibrationMethod(method);
     setCalibrationPoints([]);
     if (method === 'vertical_marker') {
       addNotification('Vertical Marker: Shift+Click higher point, then lower point.', 'info');
+    } else if (method === 'depth') {
+      addNotification('Depth Calibration: Shift+Click to place a single reference pin.', 'info');
     } else {
       addNotification('Calibration Mode: Shift+Click two points to define distance', 'info');
     }
@@ -293,6 +374,15 @@ export default function App() {
   };
 
   const handleCalibrationPointClick = (point: [number, number, number]) => {
+    if (calibrationMethod === 'depth') {
+      if (calibrationPoints.length < 1) {
+        const newPoints = [point];
+        setCalibrationPoints(newPoints);
+        addNotification('Reference pin position set! Enter its depth in sidebar.', 'success');
+      }
+      return;
+    }
+
     if (calibrationPoints.length < 2) {
       const newPoints = [...calibrationPoints, point];
       setCalibrationPoints(newPoints);
@@ -311,6 +401,23 @@ export default function App() {
   };
 
   const handleApplyCalibration = (realDistance: number, wgs1?: WGS84Coordinate, wgs2?: WGS84Coordinate) => {
+    if (calibrationMethod === 'depth') {
+      if (calibrationPoints.length !== 1) return;
+      const refPos = calibrationPoints[0];
+      const newId = uuidv4();
+      const newName = `Depth Ref Pin`;
+      setPoints(prev => [...prev, { id: newId, position: refPos, name: newName }]);
+      setSelectedPinId(newId);
+      
+      setDepthCalibrationRefPinId(newId);
+      setDepthCalibrationRefDepthValue(realDistance);
+      setDepthCalibrationRefPoint(refPos);
+      setIsCalibrationMode(false);
+      setCalibrationPoints([]);
+      addNotification('Depth calibration successfully applied!', 'success');
+      return;
+    }
+
     if (calibrationPoints.length !== 2) return;
     
     // Calculate distance between points in 3D space
@@ -352,8 +459,22 @@ export default function App() {
     } else {
       addNotification(`Grid calibrated! 1 cell = 10cm`, 'success');
     }
-    
-    setCalibrationPoints([]);
+  };
+
+  const handleAddBoundaryAtPosition = (center: [number, number, number]) => {
+    const newId = uuidv4();
+    const newName = `Boundary ${boundaries.length + 1}`;
+    const newBoundary: Boundary = {
+      id: newId,
+      name: newName,
+      center,
+      size: 5.0, // Default to a 5x5m square
+      rotation: 0 // Default degrees rotation around Y-axis
+    };
+    setBoundaries(prev => [...prev, newBoundary]);
+    setSelectedBoundaryId(newId);
+    setIsPlacingBoundary(false);
+    addNotification('New boundary box placed at cursor', 'success');
   };
 
 
@@ -665,6 +786,12 @@ export default function App() {
         onShowProxyHelp={() => setShowProxyHelp(true)}
         onShowEditToolsHelp={() => setShowEditToolsHelp(true)}
         onShowSettingsHelp={() => setShowSettingsHelp(true)}
+        depthCalibrationRefPinId={depthCalibrationRefPinId}
+        depthCalibrationRefDepthValue={depthCalibrationRefDepthValue}
+        depthCalibrationRefPoint={depthCalibrationRefPoint}
+        calibrationMethod={calibrationMethod}
+        isBoundaryPanelExpanded={isBoundaryPanelExpanded}
+        setIsBoundaryPanelExpanded={setIsBoundaryPanelExpanded}
       />
       <main className="flex-1 relative">
         <div id="svg-overlay" className="absolute top-0 left-0 w-full h-full pointer-events-none z-50"></div>
@@ -714,8 +841,8 @@ export default function App() {
           selectionPenetrate={selectionPenetrate}
           brushSize={brushSize}
           eraserHistory={eraserHistory}
-          setEraserHistory={setEraserHistory}
-          erasedIndices={erasedIndices}
+          setEraserHistory={handleSetEraserHistory}
+          erasedIndices={effectiveErasedIndices}
           setErasedIndices={setErasedIndices}
           selectedIndices={selectedIndices}
           setSelectedIndices={setSelectedIndices}
@@ -724,6 +851,14 @@ export default function App() {
           setOriginalColors={setOriginalColors}
           connectedPinIds={connectedPinIds}
           connectionLineColor={connectionLineColor}
+          boundaries={boundaries}
+          boundariesOpacity={boundariesOpacity}
+          setBoundaries={setBoundaries}
+          selectedBoundaryId={selectedBoundaryId}
+          setSelectedBoundaryId={handleSelectBoundaryFromViewport}
+          isPlacingBoundary={isPlacingBoundary}
+          setIsPlacingBoundary={setIsPlacingBoundary}
+          onAddBoundaryAtPosition={handleAddBoundaryAtPosition}
         />
         <WidgetPanel
           points={points}
@@ -745,6 +880,40 @@ export default function App() {
           undoneDeletedLayersHistory={undoneDeletedLayersHistory}
           setUndoneDeletedLayersHistory={setUndoneDeletedLayersHistory}
         />
+        {/* Floating Boundary Box Toggle under LayerWidget */}
+        <div className="absolute top-[136px] left-6 z-50 flex flex-col gap-2">
+          <button
+            onClick={() => {
+              const nextState = !isBoundaryPanelExpanded;
+              setIsBoundaryPanelExpanded(nextState);
+              if (!nextState) {
+                setSelectedBoundaryId(null); // Deselect boundary after closing the boundary widget
+              }
+            }}
+            className={`p-3 rounded-full shadow-lg border transition-all flex items-center justify-center cursor-pointer ${
+              isBoundaryPanelExpanded
+                ? 'bg-indigo-600 border-indigo-500 text-white hover:bg-indigo-500 scale-105 shadow-md ring-2 ring-indigo-500/20'
+                : 'bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700'
+            }`}
+            title="Toggle Boundary Box Panel"
+          >
+            <Box size={20} />
+          </button>
+        </div>
+        {isBoundaryPanelExpanded && (
+          <BoundaryBoxPanel
+            boundaries={boundaries}
+            setBoundaries={setBoundaries}
+            selectedBoundaryId={selectedBoundaryId}
+            setSelectedBoundaryId={setSelectedBoundaryId}
+            isPlacingBoundary={isPlacingBoundary}
+            setIsPlacingBoundary={setIsPlacingBoundary}
+            isExpanded={isBoundaryPanelExpanded}
+            setIsExpanded={setIsBoundaryPanelExpanded}
+            boundariesOpacity={boundariesOpacity}
+            setBoundariesOpacity={setBoundariesOpacity}
+          />
+        )}
         <SelectionWidget
           selectionMode={selectionMode}
           setSelectionMode={setSelectionMode}
@@ -753,23 +922,19 @@ export default function App() {
           brushSize={brushSize}
           setBrushSize={setBrushSize}
           hasSelection={selectedIndices.size > 0}
+          isTimelineExpanded={isTimelineExpanded}
+          setIsTimelineExpanded={setIsTimelineExpanded}
+          eraserHistory={eraserHistory}
+          timelineIndex={timelineIndex}
+          setTimelineIndex={setTimelineIndex}
           onEraseSelected={() => {
             if (selectedIndices.size === 0) return;
-            // Record eraser history
+            // Record eraser history through custom controller
             const newStroke = {
               type: 'manual' as const,
               indices: Array.from(selectedIndices)
             };
-            setEraserHistory(prev => [...prev, newStroke]);
-            // Apply erased
-            setErasedIndices((prev: Map<number, number>) => {
-              const next = new Map(prev);
-              selectedIndices.forEach(idx => {
-                const current = next.get(idx) || 0;
-                next.set(idx, current + 1);
-              });
-              return next;
-            });
+            handleSetEraserHistory(prev => [...prev, newStroke]);
             // Clear selection
             setSelectedIndices(new Set());
           }}

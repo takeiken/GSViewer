@@ -53,9 +53,17 @@ type SidebarProps = {
   onToggleLock: (field: string) => void;
   isCalibrationMode: boolean;
   calibrationPoints: [number, number, number][];
-  onStartCalibration: (method: 'size' | 'vertical_marker') => void;
+  onStartCalibration: (method: 'size' | 'vertical_marker' | 'depth') => void;
   onCancelCalibration: () => void;
   onApplyCalibration: (distance: number, wgs1?: {lat: number, lng: number}, wgs2?: {lat: number, lng: number}) => void;
+  
+  // Depth calibration reference data
+  depthCalibrationRefPinId?: string | null;
+  depthCalibrationRefDepthValue?: number | null;
+  depthCalibrationRefPoint?: [number, number, number] | null;
+  calibrationMethod?: 'size' | 'vertical_marker' | 'depth';
+  isBoundaryPanelExpanded?: boolean;
+  setIsBoundaryPanelExpanded?: (val: boolean) => void;
   onRecreateProxy: () => void;
   onRemoveRedProxies: () => void;
   debugProxy: boolean;
@@ -200,6 +208,10 @@ export default function Sidebar({
   onStartCalibration,
   onCancelCalibration,
   onApplyCalibration,
+  depthCalibrationRefPinId,
+  depthCalibrationRefDepthValue,
+  depthCalibrationRefPoint,
+  calibrationMethod = 'size',
   onRecreateProxy,
   onRemoveRedProxies,
   debugProxy,
@@ -242,6 +254,8 @@ export default function Sidebar({
   onShowProxyHelp,
   onShowEditToolsHelp,
   onShowSettingsHelp,
+  isBoundaryPanelExpanded,
+  setIsBoundaryPanelExpanded,
 }: SidebarProps) {
   const [inputUrl, setInputUrl] = useState(splatUrl);
   const [editingNameId, setEditingNameId] = useState<string | null>(null);
@@ -1380,7 +1394,7 @@ export default function Sidebar({
                     className={`w-full py-1.5 px-3 rounded text-xs transition-colors ${
                       !isLocked('gridSize') 
                         ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed' 
-                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                        : 'bg-indigo-600 hover:bg-indigo-505 text-white'
                     }`}
                     title={!isLocked('gridSize') ? "Lock grid size to enable calibration" : "Start Size Calibration"}
                   >
@@ -1392,25 +1406,45 @@ export default function Sidebar({
                     className={`w-full py-1.5 px-3 rounded text-xs transition-colors ${
                       !isLocked('gridSize') 
                         ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed' 
-                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                        : 'bg-indigo-600 hover:bg-indigo-505 text-white'
                     }`}
                     title={!isLocked('gridSize') ? "Lock grid size to enable calibration" : "Start Vertical Marker Calibration"}
                   >
                     Start Vertical Marker Calibration
                   </button>
+                  <button 
+                    onClick={() => onStartCalibration('depth')}
+                    disabled={!isLocked('gridSize')}
+                    className={`w-full py-1.5 px-3 rounded text-xs transition-all flex items-center justify-center gap-1 bg-indigo-600 hover:bg-indigo-505 text-white`}
+                    title="Start Depth Calibration (Place 1 reference pin and define its depth)"
+                  >
+                    Start Depth Calibration
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <div className="text-xs text-neutral-300">
-                    {calibrationPoints.length === 0 && "Shift+Click 1st point"}
-                    {calibrationPoints.length === 1 && "Shift+Click 2nd point"}
-                    {calibrationPoints.length === 2 && "Enter distance & Apply"}
+                  <div className="text-xs text-neutral-300 font-medium">
+                    {calibrationMethod === 'depth' ? (
+                      <>
+                        {calibrationPoints.length === 0 && "📍 Shift+Click to place your reference pin"}
+                        {calibrationPoints.length === 1 && "📐 Pin placed! Enter depth below and click Apply."}
+                      </>
+                    ) : (
+                      <>
+                        {calibrationPoints.length === 0 && "Shift+Click 1st point"}
+                        {calibrationPoints.length === 1 && "Shift+Click 2nd point"}
+                        {calibrationPoints.length === 2 && "Enter distance & Apply"}
+                      </>
+                    )}
                   </div>
                   
-                  {calibrationPoints.length === 2 && (
+                  {((calibrationPoints.length === 2 && calibrationMethod !== 'depth') ||
+                    (calibrationPoints.length === 1 && calibrationMethod === 'depth')) && (
                     <div className="space-y-3">
                       <div>
-                        <label className="text-[10px] text-neutral-500 block mb-1">Real Distance (meters)</label>
+                        <label className="text-[10px] text-neutral-500 block mb-1">
+                          {calibrationMethod === 'depth' ? 'Reference Depth (meters)' : 'Real Distance (meters)'}
+                        </label>
                         <input 
                           type="number" 
                           min="0.01" 
@@ -1427,50 +1461,59 @@ export default function Sidebar({
                         />
                       </div>
                       
-                      <div className="space-y-2 border-t border-neutral-800 pt-2">
-                        <label className="text-[10px] text-neutral-500 block">Start WGS84 (Lat, Lng)</label>
-                        <div className="flex gap-1">
-                          <input 
-                            type="number" 
-                            placeholder="Lat"
-                            value={wgs1Lat}
-                            onChange={(e) => setWgs1Lat(e.target.value)}
-                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
-                          />
-                          <input 
-                            type="number" 
-                            placeholder="Lng"
-                            value={wgs1Lng}
-                            onChange={(e) => setWgs1Lng(e.target.value)}
-                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
-                          />
-                        </div>
-                      </div>
+                      {calibrationMethod !== 'depth' && (
+                        <>
+                          <div className="space-y-2 border-t border-neutral-800 pt-2">
+                            <label className="text-[10px] text-neutral-500 block">Start WGS84 (Lat, Lng)</label>
+                            <div className="flex gap-1">
+                              <input 
+                                type="number" 
+                                placeholder="Lat"
+                                value={wgs1Lat}
+                                onChange={(e) => setWgs1Lat(e.target.value)}
+                                className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                              />
+                              <input 
+                                type="number" 
+                                placeholder="Lng"
+                                value={wgs1Lng}
+                                onChange={(e) => setWgs1Lng(e.target.value)}
+                                className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                              />
+                            </div>
+                          </div>
 
-                      <div className="space-y-2">
-                        <label className="text-[10px] text-neutral-500 block">End WGS84 (Lat, Lng)</label>
-                        <div className="flex gap-1">
-                          <input 
-                            type="number" 
-                            placeholder="Lat"
-                            value={wgs2Lat}
-                            onChange={(e) => setWgs2Lat(e.target.value)}
-                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
-                          />
-                          <input 
-                            type="number" 
-                            placeholder="Lng"
-                            value={wgs2Lng}
-                            onChange={(e) => setWgs2Lng(e.target.value)}
-                            className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
-                          />
-                        </div>
-                      </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] text-neutral-500 block">End WGS84 (Lat, Lng)</label>
+                            <div className="flex gap-1">
+                              <input 
+                                type="number" 
+                                placeholder="Lat"
+                                value={wgs2Lat}
+                                onChange={(e) => setWgs2Lat(e.target.value)}
+                                className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                              />
+                              <input 
+                                type="number" 
+                                placeholder="Lng"
+                                value={wgs2Lng}
+                                onChange={(e) => setWgs2Lng(e.target.value)}
+                                className="w-1/2 min-w-0 bg-neutral-950 border border-neutral-700 rounded px-1 py-1 text-[10px] text-neutral-200"
+                              />
+                            </div>
+                          </div>
+                        </>
+                      )}
 
                       <button 
                         onClick={() => {
                           const val = parseFloat(calibrationDistance);
                           if (!isNaN(val) && val > 0) {
+                            if (calibrationMethod === 'depth') {
+                              onApplyCalibration(val);
+                              return;
+                            }
+                            
                             const wgsFields = [wgs1Lat, wgs1Lng, wgs2Lat, wgs2Lng];
                             const filledCount = wgsFields.filter(f => f.trim() !== "").length;
                             
@@ -2098,6 +2141,21 @@ export default function Sidebar({
                         <span className="text-[10px] text-neutral-300 font-mono text-right">{toReal(point.position[2])}</span>
                       </div>
                     </div>
+                    
+                    {depthCalibrationRefDepthValue !== null && depthCalibrationRefPoint !== null && (
+                      <div className="mt-1.5 pt-1 border-t border-neutral-800 flex justify-between items-center text-[10px] bg-indigo-950/15 px-2 py-1.5 rounded border border-indigo-900/40">
+                        <span className="text-[9px] text-indigo-400 font-mono uppercase font-bold tracking-tight">Calibrated Depth</span>
+                        <span className="text-xs text-indigo-300 font-mono font-bold">
+                          {(() => {
+                            const dy = point.position[1] - depthCalibrationRefPoint[1];
+                            const dy_meters = gridSize > 0 ? (dy * gridDivisions) / (10 * gridSize) : 0;
+                            const depth = depthCalibrationRefDepthValue - dy_meters;
+                            return `${depth.toFixed(3)}m`;
+                          })()}
+                        </span>
+                      </div>
+                    )}
+
                     {wgs84Calibration && (
                       <div className="mt-1 pt-1 border-t border-neutral-800 flex flex-col">
                         <span className="text-[9px] text-neutral-500 font-mono">WGS84 Coordinate</span>
